@@ -64,6 +64,17 @@ data class CompareResultPayload(
     val second: AssistantMessageDraft,
 )
 
+sealed interface AssistantStreamEvent {
+    data class Streaming(
+        val accumulatedContent: String,
+        val isProcessing: Boolean,
+    ) : AssistantStreamEvent
+
+    data class Completed(
+        val draft: AssistantMessageDraft,
+    ) : AssistantStreamEvent
+}
+
 enum class MessageRole {
     USER,
     ASSISTANT,
@@ -78,6 +89,16 @@ enum class CompareWinner {
     SECOND,
 }
 
+enum class ModelPickerMode {
+    CHAT,
+    COMPARE_A,
+    COMPARE_B,
+    ;
+
+    val supportsCompare: Boolean
+        get() = this != CHAT
+}
+
 sealed interface UiError {
     data object None : UiError
     data object MissingApiKey : UiError
@@ -87,15 +108,32 @@ sealed interface UiError {
     data class Unknown(val message: String) : UiError
 }
 
+class UiException(
+    val error: UiError,
+    cause: Throwable? = null,
+) : RuntimeException(
+    when (error) {
+        UiError.None -> "Unknown UI error"
+        UiError.MissingApiKey -> "Missing API key"
+        is UiError.Network -> error.message
+        is UiError.Provider -> error.message
+        is UiError.Unknown -> error.message
+        is UiError.Validation -> error.message
+    },
+    cause,
+)
+
 interface ProjectsRepository {
     fun observeProjects(): Flow<List<Project>>
     suspend fun createProject(title: String): Long
     suspend fun getProject(projectId: Long): Project?
+    suspend fun deleteProject(projectId: Long)
 }
 
 interface ThreadsRepository {
     fun observeThreads(projectId: Long): Flow<List<Thread>>
     suspend fun createThread(projectId: Long, title: String? = null): Long
+    suspend fun deleteThread(threadId: Long)
     fun observeMessages(threadId: Long): Flow<List<Message>>
     suspend fun insertUserMessage(threadId: Long, content: String, targetModel: String)
     suspend fun insertAssistantMessage(
@@ -111,6 +149,10 @@ interface ThreadsRepository {
 }
 
 interface SettingsRepository {
+    suspend fun getApiKeys(): List<String>
+    suspend fun getPrimaryApiKey(): String?
+    suspend fun addApiKey(key: String)
+    suspend fun removeApiKey(key: String)
     suspend fun getApiKey(): String?
     suspend fun saveApiKey(key: String)
     suspend fun clearApiKey()
@@ -119,11 +161,16 @@ interface SettingsRepository {
 
 interface ModelsRepository {
     suspend fun getCachedModels(): List<ModelCatalogEntry>
-    suspend fun refreshModels(apiKey: String): List<ModelCatalogEntry>
+    suspend fun refreshModels(): List<ModelCatalogEntry>
 }
 
 interface ChatRepository {
-    suspend fun sendMessage(threadId: Long, modelId: String, prompt: String): AssistantMessageDraft
+    suspend fun sendMessage(
+        threadId: Long,
+        modelId: String,
+        prompt: String,
+        history: List<Message>,
+    ): AssistantMessageDraft
 }
 
 interface CompareRepository {
@@ -132,5 +179,13 @@ interface CompareRepository {
         modelA: String,
         modelB: String,
         prompt: String,
+        history: List<Message>,
     ): CompareResultPayload
+
+    fun streamModelResponse(
+        threadId: Long,
+        modelId: String,
+        prompt: String,
+        history: List<Message>,
+    ): Flow<AssistantStreamEvent>
 }

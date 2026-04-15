@@ -18,6 +18,7 @@ data class OpenRouterModelDto(
 data class OpenRouterChatRequest(
     val model: String,
     val messages: List<OpenRouterMessageDto>,
+    val stream: Boolean = false,
 )
 
 @Serializable
@@ -28,16 +29,55 @@ data class OpenRouterMessageDto(
 
 @Serializable
 data class OpenRouterChatResponse(
+    val id: String? = null,
     val choices: List<OpenRouterChoiceDto> = emptyList(),
+    val model: String? = null,
     val usage: OpenRouterUsageDto? = null,
 )
 
 @Serializable
 data class OpenRouterChoiceDto(
+    @SerialName("finish_reason") val finishReason: String? = null,
     val message: OpenRouterMessageDto? = null,
 )
 
 @Serializable
+data class OpenRouterStreamChunkDto(
+    val id: String? = null,
+    val model: String? = null,
+    val provider: String? = null,
+    val choices: List<OpenRouterStreamChoiceDto> = emptyList(),
+    val usage: OpenRouterUsageDto? = null,
+    val error: OpenRouterErrorDto? = null,
+)
+
+@Serializable
+data class OpenRouterStreamChoiceDto(
+    val delta: OpenRouterStreamDeltaDto? = null,
+    @SerialName("finish_reason") val finishReason: String? = null,
+)
+
+@Serializable
+data class OpenRouterStreamDeltaDto(
+    val content: String? = null,
+)
+
+@Serializable
+data class OpenRouterErrorDto(
+    val code: String? = null,
+    val message: String? = null,
+)
+
+@Serializable
+data class OpenRouterErrorResponse(
+    val error: OpenRouterErrorDto? = null,
+)
+
+@Serializable
 data class OpenRouterUsageDto(
+    @SerialName("prompt_tokens") val promptTokens: Int? = null,
+    @SerialName("completion_tokens") val completionTokens: Int? = null,
+    @SerialName("total_tokens") val totalTokens: Int? = null,
+    val cost: Double? = null,
     @SerialName("total_cost") val totalCost: Double? = null,
 )
