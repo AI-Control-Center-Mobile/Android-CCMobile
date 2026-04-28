@@ -92,6 +92,7 @@ class OpenRouterModelsRepository(
                         )
                     },
                 )
+                settingsRepository.promoteSuccessfulFallback(index, apiKey)
                 return models
             } catch (throwable: Throwable) {
                 val failure = throwable.toModelsExecutionException()
@@ -180,7 +181,9 @@ private class OpenRouterCompletionExecutor(
 
         apiKeys.forEachIndexed { index, apiKey ->
             try {
-                return executeCompletion(apiKey, modelId, prompt, history)
+                val draft = executeCompletion(apiKey, modelId, prompt, history)
+                settingsRepository.promoteSuccessfulFallback(index, apiKey)
+                return draft
             } catch (failure: OpenRouterExecutionException) {
                 lastFailure = failure
                 if (!failure.shouldFailover || index == apiKeys.lastIndex) {
@@ -204,6 +207,7 @@ private class OpenRouterCompletionExecutor(
             try {
                 emit(AssistantStreamEvent.Streaming(accumulatedContent = "", isProcessing = true))
                 streamCompletionAttempt(apiKey, modelId, prompt, history).collect { emit(it) }
+                settingsRepository.promoteSuccessfulFallback(index, apiKey)
                 return@flow
             } catch (failure: OpenRouterExecutionException) {
                 lastFailure = failure
@@ -478,6 +482,13 @@ private class OpenRouterExecutionException(
     cause,
 ) {
     fun toUiException(): UiException = UiException(uiError, this)
+}
+
+private suspend fun SettingsRepository.promoteSuccessfulFallback(index: Int, apiKey: String) {
+    if (index == 0) return
+    runCatching {
+        addApiKey(apiKey)
+    }
 }
 
 private fun Response.toExecutionException(json: Json): OpenRouterExecutionException {

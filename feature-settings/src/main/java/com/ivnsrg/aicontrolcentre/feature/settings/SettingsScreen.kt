@@ -118,7 +118,10 @@ class SettingsViewModel(
         }
     }
 
-    fun removeKey(key: String) {
+    fun removeKey(
+        key: String,
+        onAllKeysRemoved: () -> Unit,
+    ) {
         viewModelScope.launch {
             settingsRepository.removeApiKey(key)
             val keys = settingsRepository.getApiKeys()
@@ -127,6 +130,17 @@ class SettingsViewModel(
                 saveStatus = SettingsSaveStatus.Idle,
                 saveMessage = null,
             )
+            if (keys.isEmpty()) {
+                onAllKeysRemoved()
+            }
+        }
+    }
+
+    fun clearKeys(onDone: () -> Unit) {
+        viewModelScope.launch {
+            settingsRepository.clearApiKey()
+            _uiState.value = SettingsUiState()
+            onDone()
         }
     }
 
@@ -165,7 +179,35 @@ fun SettingsRoute(
 ) {
     val viewModel: SettingsViewModel = viewModel(factory = SettingsViewModelFactory(settingsRepository))
     val uiState by viewModel.uiState.collectAsState()
+    var pendingRemoveKey by remember { mutableStateOf<String?>(null) }
+    var showClearKeysDialog by remember { mutableStateOf(false) }
     var showClearAllDialog by remember { mutableStateOf(false) }
+
+    pendingRemoveKey?.let { key ->
+        ConfirmDialog(
+            title = "Remove saved key?",
+            message = "This removes the selected API key. If it is the last key, the app will return to setup.",
+            confirmText = "Remove",
+            onConfirm = {
+                pendingRemoveKey = null
+                viewModel.removeKey(key, onApiKeyRemoved)
+            },
+            onDismiss = { pendingRemoveKey = null },
+        )
+    }
+
+    if (showClearKeysDialog) {
+        ConfirmDialog(
+            title = "Clear all API keys?",
+            message = "This removes saved OpenRouter keys only. Projects, threads and messages stay on device.",
+            confirmText = "Clear keys",
+            onConfirm = {
+                showClearKeysDialog = false
+                viewModel.clearKeys(onApiKeyRemoved)
+            },
+            onDismiss = { showClearKeysDialog = false },
+        )
+    }
 
     if (showClearAllDialog) {
         ConfirmDialog(
@@ -184,7 +226,8 @@ fun SettingsRoute(
         uiState = uiState,
         onDraftChange = viewModel::updateKeyDraft,
         onAddKey = viewModel::addKey,
-        onRemoveKey = viewModel::removeKey,
+        onRemoveKey = { pendingRemoveKey = it },
+        onClearKeys = { showClearKeysDialog = true },
         onClearAll = { showClearAllDialog = true },
     )
 }
@@ -195,6 +238,7 @@ fun SettingsScreen(
     onDraftChange: (String) -> Unit,
     onAddKey: () -> Unit,
     onRemoveKey: (String) -> Unit,
+    onClearKeys: () -> Unit,
     onClearAll: () -> Unit,
 ) {
     val colors = MaterialTheme.appColors
@@ -267,6 +311,11 @@ fun SettingsScreen(
                             },
                             onClick = onAddKey,
                             enabled = !uiState.isClearing,
+                        )
+                        SecondaryButton(
+                            text = "Clear saved keys",
+                            onClick = onClearKeys,
+                            enabled = uiState.apiKeys.isNotEmpty() && !uiState.isClearing,
                         )
                     }
                 }

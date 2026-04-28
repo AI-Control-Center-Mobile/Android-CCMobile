@@ -44,7 +44,11 @@ class DefaultAppContainer(
         DefaultProjectsRepository(database.projectsDao())
     }
     override val threadsRepository: ThreadsRepository by lazy {
-        DefaultThreadsRepository(database.threadsDao(), database.messagesDao())
+        DefaultThreadsRepository(
+            threadsDao = database.threadsDao(),
+            messagesDao = database.messagesDao(),
+            projectsDao = database.projectsDao(),
+        )
     }
     override val settingsRepository: SettingsRepository by lazy {
         DefaultSettingsRepository(database, secureApiKeyStorage, preferencesStore)

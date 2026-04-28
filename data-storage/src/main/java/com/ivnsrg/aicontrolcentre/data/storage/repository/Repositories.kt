@@ -38,25 +38,36 @@ class DefaultProjectsRepository(
     }
 
     override suspend fun getProject(projectId: Long): Project? = projectsDao.getProject(projectId)?.toDomain()
+
+    override suspend fun deleteProject(projectId: Long) {
+        projectsDao.deleteProject(projectId)
+    }
 }
 
 class DefaultThreadsRepository(
     private val threadsDao: ThreadsDao,
     private val messagesDao: MessagesDao,
+    private val projectsDao: ProjectsDao? = null,
 ) : ThreadsRepository {
     override fun observeThreads(projectId: Long): Flow<List<Thread>> =
         threadsDao.observeThreads(projectId).map { items -> items.map { it.toDomain() } }
 
     override suspend fun createThread(projectId: Long, title: String?): Long {
         val now = System.currentTimeMillis()
-        return threadsDao.insert(
+        val threadId = threadsDao.insert(
             ThreadEntity(
                 projectId = projectId,
-                title = title ?: "Thread ${now.toString().takeLast(4)}",
+                title = title?.takeIf(String::isNotBlank) ?: "New Thread",
                 createdAt = now,
                 updatedAt = now,
             ),
         )
+        projectsDao?.updateProjectUpdatedAt(projectId, now)
+        return threadId
+    }
+
+    override suspend fun deleteThread(threadId: Long) {
+        threadsDao.deleteThread(threadId)
     }
 
     override fun observeMessages(threadId: Long) =
@@ -103,6 +114,7 @@ class DefaultThreadsRepository(
 
     override suspend fun updateThreadMetadata(threadId: Long, updatedAt: Long) {
         threadsDao.updateThreadUpdatedAt(threadId, updatedAt)
+        threadsDao.updateParentProjectUpdatedAt(threadId, updatedAt)
     }
 }
 
@@ -111,10 +123,22 @@ class DefaultSettingsRepository(
     private val secureApiKeyStorage: SecureApiKeyStorage,
     private val appPreferencesStore: AppPreferencesStore,
 ) : SettingsRepository {
+    override suspend fun getApiKeys(): List<String> = secureApiKeyStorage.getApiKeys()
+
+    override suspend fun getPrimaryApiKey(): String? = secureApiKeyStorage.getPrimaryApiKey()
+
+    override suspend fun addApiKey(key: String) {
+        secureApiKeyStorage.addApiKey(key)
+    }
+
+    override suspend fun removeApiKey(key: String) {
+        secureApiKeyStorage.removeApiKey(key)
+    }
+
     override suspend fun getApiKey(): String? = secureApiKeyStorage.getApiKey()
 
     override suspend fun saveApiKey(key: String) {
-        secureApiKeyStorage.saveApiKey(key)
+        secureApiKeyStorage.addApiKey(key)
     }
 
     override suspend fun clearApiKey() {

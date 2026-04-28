@@ -18,6 +18,12 @@ interface ThreadsDao {
     @Query("UPDATE threads SET updatedAt = :updatedAt WHERE id = :threadId")
     suspend fun updateThreadUpdatedAt(threadId: Long, updatedAt: Long): Int
 
+    @Query("UPDATE projects SET updatedAt = :updatedAt WHERE id = (SELECT projectId FROM threads WHERE id = :threadId)")
+    suspend fun updateParentProjectUpdatedAt(threadId: Long, updatedAt: Long): Int
+
+    @Query("DELETE FROM threads WHERE id = :threadId")
+    suspend fun deleteThread(threadId: Long): Int
+
     @Query("DELETE FROM threads")
     suspend fun clear(): Int
 }

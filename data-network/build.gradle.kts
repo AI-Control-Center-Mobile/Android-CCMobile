@@ -19,6 +19,7 @@ android {
 
 dependencies {
     implementation(project(":core-model"))
+    implementation(project(":data-storage"))
 
     implementation(libs.retrofit)
     implementation(libs.retrofit.kotlinx.serialization)
