@@ -39,6 +39,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
@@ -458,28 +459,48 @@ fun FloatingBottomBarContainer(
     content: @Composable RowScope.() -> Unit,
 ) {
     val colors = MaterialTheme.appColors
+    val shape = RoundedCornerShape(28.dp)
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(colors.background),
+            .navigationBarsPadding()
+            .padding(horizontal = 14.dp, vertical = 8.dp),
     ) {
-        Row(
-            modifier = Modifier
-                .padding(horizontal = 20.dp, vertical = 8.dp)
-                .fillMaxWidth()
-                .border(1.dp, colors.stroke, RoundedCornerShape(24.dp))
-                .background(colors.surface3, RoundedCornerShape(24.dp))
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-            content = content,
-        )
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .windowInsetsBottomHeight(WindowInsets.navigationBars)
-                .background(colors.background),
-        )
+                .shadow(
+                    elevation = 24.dp,
+                    shape = shape,
+                    ambientColor = colors.background.copy(alpha = 0.72f),
+                    spotColor = colors.accentPrimary.copy(alpha = 0.18f),
+                )
+                .border(1.dp, colors.stroke.copy(alpha = 0.7f), shape)
+                .background(colors.surface2.copy(alpha = 0.82f), shape),
+        ) {
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .background(
+                        brush = Brush.verticalGradient(
+                            colors = listOf(
+                                colors.textPrimary.copy(alpha = 0.08f),
+                                colors.accentPrimary.copy(alpha = 0.03f),
+                                Color.Transparent,
+                            ),
+                        ),
+                        shape = shape,
+                    ),
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+                content = content,
+            )
+        }
     }
 }
 
