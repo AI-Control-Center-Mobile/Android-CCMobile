@@ -1,8 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="com.ivnsrg.aicontrolcentre.data.network.mapper.NetworkMappersTest" tests="2" skipped="0" failures="0" errors="0" timestamp="2026-04-03T12:00:55.174Z" hostname="MacBook-Pro-Sergey.local" time="0.01">
-  <properties/>
-  <testcase name="chat response maps to assistant draft" classname="com.ivnsrg.aicontrolcentre.data.network.mapper.NetworkMappersTest" time="0.009"/>
-  <testcase name="model dto maps to domain model" classname="com.ivnsrg.aicontrolcentre.data.network.mapper.NetworkMappersTest" time="0.001"/>
-  <system-out><![CDATA[]]></system-out>
-  <system-err><![CDATA[]]></system-err>
-</testsuite>
