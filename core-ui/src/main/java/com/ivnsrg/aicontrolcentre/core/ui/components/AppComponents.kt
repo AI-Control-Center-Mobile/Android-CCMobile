@@ -1,21 +1,29 @@
 package com.ivnsrg.aicontrolcentre.core.ui.components
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -25,8 +33,39 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.ivnsrg.aicontrolcentre.core.ui.theme.LocalSpacing
+
+enum class UiStateKind {
+    LOADING,
+    EMPTY,
+    RECOVERABLE_ERROR,
+}
+
+@Composable
+fun AppCard(
+    modifier: Modifier = Modifier,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Card(
+        modifier = modifier,
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface,
+            contentColor = MaterialTheme.colorScheme.onSurface,
+        ),
+        border = CardDefaults.outlinedCardBorder(),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            content = content,
+        )
+    }
+}
 
 @Composable
 fun PrimaryButton(
@@ -39,9 +78,11 @@ fun PrimaryButton(
         onClick = onClick,
         modifier = modifier.fillMaxWidth(),
         enabled = enabled,
-        contentPadding = PaddingValues(vertical = 16.dp),
+        shape = RoundedCornerShape(16.dp),
+        colors = ButtonDefaults.buttonColors(),
+        contentPadding = PaddingValues(vertical = 16.dp, horizontal = 20.dp),
     ) {
-        Text(text)
+        Text(text = text, style = MaterialTheme.typography.labelLarge)
     }
 }
 
@@ -56,9 +97,10 @@ fun SecondaryButton(
         onClick = onClick,
         modifier = modifier.fillMaxWidth(),
         enabled = enabled,
-        contentPadding = PaddingValues(vertical = 16.dp),
+        shape = RoundedCornerShape(16.dp),
+        contentPadding = PaddingValues(vertical = 16.dp, horizontal = 20.dp),
     ) {
-        Text(text)
+        Text(text = text, style = MaterialTheme.typography.labelLarge)
     }
 }
 
@@ -68,14 +110,25 @@ fun AppTextField(
     onValueChange: (String) -> Unit,
     label: String,
     modifier: Modifier = Modifier,
+    placeholder: String? = null,
     enabled: Boolean = true,
+    singleLine: Boolean = true,
+    isSecret: Boolean = false,
 ) {
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
         label = { Text(label) },
+        placeholder = placeholder?.let { { Text(it) } },
         modifier = modifier.fillMaxWidth(),
         enabled = enabled,
+        singleLine = singleLine,
+        visualTransformation = if (isSecret) PasswordVisualTransformation() else VisualTransformation.None,
+        textStyle = MaterialTheme.typography.bodyMedium.copy(
+            fontFamily = if (isSecret) FontFamily.Monospace else FontFamily.Default,
+        ),
+        shape = RoundedCornerShape(16.dp),
+        colors = OutlinedTextFieldDefaults.colors(),
     )
 }
 
@@ -87,9 +140,13 @@ fun MetadataChip(
     AssistChip(
         onClick = {},
         enabled = false,
-        label = { Text(text) },
+        label = { Text(text, style = MaterialTheme.typography.labelSmall) },
         modifier = modifier,
-        colors = AssistChipDefaults.assistChipColors(),
+        shape = RoundedCornerShape(8.dp),
+        colors = AssistChipDefaults.assistChipColors(
+            disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+            disabledLabelColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        ),
     )
 }
 
@@ -98,42 +155,65 @@ fun MetadataChip(
 fun AppScreenScaffold(
     title: String,
     modifier: Modifier = Modifier,
+    subtitle: String? = null,
     snackbarHostState: SnackbarHostState = remember { SnackbarHostState() },
+    topBarExtras: (@Composable () -> Unit)? = null,
     content: @Composable (PaddingValues) -> Unit,
 ) {
+    val spacing = LocalSpacing.current
     Scaffold(
         modifier = modifier,
         snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
-        topBar = {
+        containerColor = MaterialTheme.colorScheme.background,
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding),
+        ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                    .padding(horizontal = spacing.md, vertical = spacing.md),
+                verticalArrangement = Arrangement.spacedBy(spacing.xs),
             ) {
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.headlineSmall,
-                )
+                Text(text = title, style = MaterialTheme.typography.headlineSmall)
+                subtitle?.let {
+                    Text(
+                        text = it,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                topBarExtras?.invoke()
             }
-        },
-        content = content,
-    )
+            content(PaddingValues(horizontal = spacing.md, vertical = spacing.sm))
+        }
+    }
 }
 
 @Composable
 fun LoadingState(
-    title: String = "Загрузка…",
+    title: String = "Loading",
+    subtitle: String = "Preparing your local workspace.",
     modifier: Modifier = Modifier,
 ) {
+    val spacing = LocalSpacing.current
     Box(
         modifier = modifier.fillMaxSize(),
         contentAlignment = Alignment.Center,
     ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Column(
+            modifier = Modifier.padding(spacing.lg),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(spacing.md),
+        ) {
             CircularProgressIndicator()
+            Text(title, style = MaterialTheme.typography.titleLarge)
             Text(
-                text = title,
-                modifier = Modifier.padding(top = 16.dp),
+                text = subtitle,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }
@@ -156,8 +236,13 @@ fun EmptyState(
             verticalArrangement = Arrangement.spacedBy(spacing.sm),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
+            MetadataChip(text = "EMPTY")
             Text(title, style = MaterialTheme.typography.titleLarge)
-            Text(subtitle, style = MaterialTheme.typography.bodyMedium)
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             action?.invoke()
         }
     }
@@ -174,13 +259,44 @@ fun RecoverableErrorState(
         title = title,
         subtitle = subtitle,
         modifier = modifier,
-        action = {
-            PrimaryButton(
-                text = "Повторить",
-                onClick = onRetry,
-            )
-        },
+        action = { PrimaryButton(text = "Retry", onClick = onRetry) },
     )
+}
+
+@Composable
+fun SectionHeader(
+    title: String,
+    modifier: Modifier = Modifier,
+) {
+    Text(
+        text = title,
+        modifier = modifier,
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+@Composable
+fun KeyValueRow(
+    label: String,
+    value: String,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.titleMedium,
+        )
+    }
 }
 
 @Composable
@@ -188,7 +304,7 @@ fun ConfirmDialog(
     title: String,
     message: String,
     confirmText: String,
-    dismissText: String = "Отмена",
+    dismissText: String = "Cancel",
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
 ) {

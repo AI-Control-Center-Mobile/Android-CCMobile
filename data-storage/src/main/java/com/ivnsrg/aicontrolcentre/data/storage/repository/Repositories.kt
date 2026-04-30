@@ -43,20 +43,23 @@ class DefaultProjectsRepository(
 class DefaultThreadsRepository(
     private val threadsDao: ThreadsDao,
     private val messagesDao: MessagesDao,
+    private val projectsDao: ProjectsDao? = null,
 ) : ThreadsRepository {
     override fun observeThreads(projectId: Long): Flow<List<Thread>> =
         threadsDao.observeThreads(projectId).map { items -> items.map { it.toDomain() } }
 
     override suspend fun createThread(projectId: Long, title: String?): Long {
         val now = System.currentTimeMillis()
-        return threadsDao.insert(
+        val threadId = threadsDao.insert(
             ThreadEntity(
                 projectId = projectId,
-                title = title ?: "Thread ${now.toString().takeLast(4)}",
+                title = title?.takeIf { it.isNotBlank() } ?: "New Thread",
                 createdAt = now,
                 updatedAt = now,
             ),
         )
+        projectsDao?.updateProjectUpdatedAt(projectId, now)
+        return threadId
     }
 
     override fun observeMessages(threadId: Long) =
@@ -103,6 +106,7 @@ class DefaultThreadsRepository(
 
     override suspend fun updateThreadMetadata(threadId: Long, updatedAt: Long) {
         threadsDao.updateThreadUpdatedAt(threadId, updatedAt)
+        threadsDao.updateParentProjectUpdatedAt(threadId, updatedAt)
     }
 }
 
@@ -110,11 +114,19 @@ class DefaultSettingsRepository(
     private val database: AppDatabase,
     private val secureApiKeyStorage: SecureApiKeyStorage,
     private val appPreferencesStore: AppPreferencesStore,
+    private val demoWorkspaceSeeder: DemoWorkspaceSeeder = DemoWorkspaceSeeder(database),
 ) : SettingsRepository {
-    override suspend fun getApiKey(): String? = secureApiKeyStorage.getApiKey()
+    override suspend fun getApiKey(): String? {
+        val apiKey = secureApiKeyStorage.getApiKey()
+        if (!apiKey.isNullOrBlank()) {
+            demoWorkspaceSeeder.seedIfEmpty()
+        }
+        return apiKey
+    }
 
     override suspend fun saveApiKey(key: String) {
         secureApiKeyStorage.saveApiKey(key)
+        demoWorkspaceSeeder.seedIfEmpty()
     }
 
     override suspend fun clearApiKey() {

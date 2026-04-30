@@ -1,51 +1,50 @@
 package com.ivnsrg.aicontrolcentre.core.ui.theme
 
-import android.app.Activity
-import android.os.Build
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 
-private val LightColors = lightColorScheme(
-    primary = Color(0xFF205781),
-    onPrimary = Color.White,
-    secondary = Color(0xFF4F6F52),
-    tertiary = Color(0xFF6B7280),
-    surface = Color(0xFFFFFBFE),
-)
+val AppBackground = Color(0xFF081019)
+val SurfacePrimary = Color(0xFF0F1724)
+val SurfaceSecondary = Color(0xFF142033)
+val SurfaceTertiary = Color(0xFF1A2A3D)
+val Stroke = Color(0xFF24364A)
+val AccentPrimary = Color(0xFF36D39A)
+val AccentInfo = Color(0xFF6FB6FF)
+val AccentWarning = Color(0xFFFFB454)
+val AccentDanger = Color(0xFFFF6B6B)
+val TextPrimary = Color(0xFFF3F7FB)
+val TextSecondary = Color(0xFF93A4B8)
+val TextMuted = Color(0xFF6E8196)
 
-private val DarkColors = darkColorScheme(
-    primary = Color(0xFF9DCAEB),
-    secondary = Color(0xFFA6D5A8),
-    tertiary = Color(0xFFD1D5DB),
+private val AppColors = darkColorScheme(
+    primary = AccentPrimary,
+    onPrimary = AppBackground,
+    secondary = AccentInfo,
+    onSecondary = AppBackground,
+    tertiary = AccentWarning,
+    onTertiary = AppBackground,
+    error = AccentDanger,
+    onError = TextPrimary,
+    background = AppBackground,
+    onBackground = TextPrimary,
+    surface = SurfacePrimary,
+    onSurface = TextPrimary,
+    surfaceVariant = SurfaceSecondary,
+    onSurfaceVariant = TextSecondary,
+    outline = Stroke,
+    outlineVariant = SurfaceTertiary,
 )
 
 @Composable
 fun AiControlCentreTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
-    dynamicColor: Boolean = true,
     content: @Composable () -> Unit,
 ) {
-    val colorScheme = when {
-        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-            val context = LocalContext.current
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        }
-
-        darkTheme -> DarkColors
-        else -> LightColors
-    }
-
     CompositionLocalProvider(LocalSpacing provides Spacing()) {
         MaterialTheme(
-            colorScheme = colorScheme,
+            colorScheme = AppColors,
             typography = AppTypography,
             content = content,
         )
