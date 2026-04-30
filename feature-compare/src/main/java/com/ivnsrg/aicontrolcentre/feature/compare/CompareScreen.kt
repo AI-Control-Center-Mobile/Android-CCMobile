@@ -167,7 +167,7 @@ class CompareViewModel(
         }
     }
 
-    fun refreshModels() {
+    fun refreshModels(forceRefresh: Boolean = false) {
         viewModelScope.launch {
             _uiState.update { it.copy(isLoadingModels = true, error = UiError.None) }
 
@@ -177,7 +177,7 @@ class CompareViewModel(
             }
 
             try {
-                val remoteModels = modelsRepository.refreshModels().filter { it.supportsCompare }
+                val remoteModels = modelsRepository.refreshModels(forceRefresh = forceRefresh).filter { it.supportsCompare }
                 val models = if (remoteModels.isNotEmpty()) {
                     remoteModels
                 } else {
@@ -266,15 +266,89 @@ class CompareViewModel(
                 )
             }
 
-            supervisorScope {
-                val history = state.messages
-                listOf(
-                    launch { collectCandidateStream(CompareSlot.FIRST, modelA, prompt, history) },
-                    launch { collectCandidateStream(CompareSlot.SECOND, modelB, prompt, history) },
-                ).joinAll()
+            runCompareSlots(
+                prompt = prompt,
+                history = state.messages,
+                requests = listOf(
+                    CompareSlot.FIRST to modelA,
+                    CompareSlot.SECOND to modelB,
+                ),
+            )
+        }
+    }
+
+    fun retryFirstCandidate() {
+        retryCandidate(CompareSlot.FIRST)
+    }
+
+    fun retrySecondCandidate() {
+        retryCandidate(CompareSlot.SECOND)
+    }
+
+    private fun retryCandidate(slot: CompareSlot) {
+        val state = _uiState.value
+        if (state.isComparing || state.isPersistingWinner) return
+
+        val prompt = state.comparedPrompt?.trim().orEmpty().ifBlank { state.promptDraft.trim() }
+        if (prompt.isBlank()) {
+            _uiState.update { it.copy(error = UiError.Validation("Нет prompt для повторного compare")) }
+            return
+        }
+
+        val modelId = when (slot) {
+            CompareSlot.FIRST -> state.firstCandidate.modelId ?: state.selectedModelA
+            CompareSlot.SECOND -> state.secondCandidate.modelId ?: state.selectedModelB
+        }
+
+        if (modelId.isNullOrBlank()) {
+            _uiState.update { it.copy(error = UiError.Validation("Нет модели для повторной попытки")) }
+            return
+        }
+
+        _uiState.update {
+            val updatedCandidate = when (slot) {
+                CompareSlot.FIRST -> it.firstCandidate.copy(
+                    modelId = modelId,
+                    status = CompareCandidateStatus.Waiting,
+                    error = UiError.None,
+                    draft = null,
+                    latencyMs = null,
+                    estimatedCost = null,
+                )
+
+                CompareSlot.SECOND -> it.secondCandidate.copy(
+                    modelId = modelId,
+                    status = CompareCandidateStatus.Waiting,
+                    error = UiError.None,
+                    draft = null,
+                    latencyMs = null,
+                    estimatedCost = null,
+                )
             }
 
-            _uiState.update { it.copy(isComparing = false) }
+            when (slot) {
+                CompareSlot.FIRST -> it.copy(
+                    isComparing = true,
+                    error = UiError.None,
+                    comparedPrompt = prompt,
+                    firstCandidate = updatedCandidate,
+                )
+
+                CompareSlot.SECOND -> it.copy(
+                    isComparing = true,
+                    error = UiError.None,
+                    comparedPrompt = prompt,
+                    secondCandidate = updatedCandidate,
+                )
+            }
+        }
+
+        viewModelScope.launch {
+            runCompareSlots(
+                prompt = prompt,
+                history = state.messages,
+                requests = listOf(slot to modelId),
+            )
         }
     }
 
@@ -370,8 +444,21 @@ class CompareViewModel(
                     error = throwable.toUiError(),
                 )
             }
-            _uiState.update { it.copy(error = throwable.toUiError()) }
         }
+    }
+
+    private suspend fun runCompareSlots(
+        prompt: String,
+        history: List<Message>,
+        requests: List<Pair<CompareSlot, String>>,
+    ) {
+        supervisorScope {
+            requests.map { (slot, modelId) ->
+                launch { collectCandidateStream(slot, modelId, prompt, history) }
+            }.joinAll()
+        }
+
+        _uiState.update { it.copy(isComparing = false) }
     }
 
     private fun updateCandidate(
@@ -460,20 +547,24 @@ fun CompareRoute(
         onOpenModelAPicker = { onOpenModelPicker(ModelPickerMode.COMPARE_A, uiState.selectedModelA) },
         onOpenModelBPicker = { onOpenModelPicker(ModelPickerMode.COMPARE_B, uiState.selectedModelB) },
         onCompare = viewModel::compare,
-        onRetry = viewModel::refreshModels,
+        onRetryFirstCandidate = viewModel::retryFirstCandidate,
+        onRetrySecondCandidate = viewModel::retrySecondCandidate,
+        onRetry = { viewModel.refreshModels(forceRefresh = true) },
         onWinnerSelected = { modelId -> viewModel.continueWithWinner(modelId, onModelChosen) },
         onDone = onDone,
     )
 }
 
 @Composable
-fun CompareScreen(
+private fun CompareScreen(
     threadId: Long,
     uiState: CompareUiState,
     onPromptChange: (String) -> Unit,
     onOpenModelAPicker: () -> Unit,
     onOpenModelBPicker: () -> Unit,
     onCompare: () -> Unit,
+    onRetryFirstCandidate: () -> Unit,
+    onRetrySecondCandidate: () -> Unit,
     onRetry: () -> Unit,
     onWinnerSelected: (String) -> Unit,
     onDone: () -> Unit,
@@ -595,7 +686,9 @@ fun CompareScreen(
                             model = modelA,
                             candidate = uiState.firstCandidate,
                             isPrimary = true,
+                            isComparing = uiState.isComparing,
                             isPersistingWinner = uiState.isPersistingWinner,
+                            onRetry = onRetryFirstCandidate,
                             onWinnerSelected = onWinnerSelected,
                         )
                     }
@@ -605,7 +698,9 @@ fun CompareScreen(
                             model = modelB,
                             candidate = uiState.secondCandidate,
                             isPrimary = false,
+                            isComparing = uiState.isComparing,
                             isPersistingWinner = uiState.isPersistingWinner,
+                            onRetry = onRetrySecondCandidate,
                             onWinnerSelected = onWinnerSelected,
                         )
                     }
@@ -687,7 +782,9 @@ private fun CompareResultCard(
     model: ModelCatalogEntry?,
     candidate: CompareCandidateUiState,
     isPrimary: Boolean,
+    isComparing: Boolean,
     isPersistingWinner: Boolean,
+    onRetry: () -> Unit,
     onWinnerSelected: (String) -> Unit,
 ) {
     val colors = MaterialTheme.appColors
@@ -695,6 +792,10 @@ private fun CompareResultCard(
     val canContinue = modelId != null &&
         candidate.status == CompareCandidateStatus.Completed &&
         candidate.draft != null &&
+        !isPersistingWinner
+    val canRetry = modelId != null &&
+        candidate.status == CompareCandidateStatus.Error &&
+        !isComparing &&
         !isPersistingWinner
 
     OperationalCard(
@@ -731,6 +832,14 @@ private fun CompareResultCard(
             }
 
             CompareCandidateBody(candidate = candidate)
+
+            if (canRetry) {
+                CompactActionButton(
+                    text = "Retry model",
+                    onClick = onRetry,
+                    tone = if (isPrimary) BadgeTone.Primary else BadgeTone.Warning,
+                )
+            }
 
             PrimaryButton(
                 text = if (isPersistingWinner) "Saving…" else "Continue with winner",

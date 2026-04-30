@@ -10,6 +10,8 @@ import com.ivnsrg.aicontrolcentre.core.model.MessageRole
 import com.ivnsrg.aicontrolcentre.core.model.ModelCatalogEntry
 import com.ivnsrg.aicontrolcentre.core.model.ModelProvider
 import com.ivnsrg.aicontrolcentre.core.model.ModelsRepository
+import com.ivnsrg.aicontrolcentre.core.model.OpenRouterDiagnosticsRepository
+import com.ivnsrg.aicontrolcentre.core.model.OpenRouterKeyDiagnostics
 import com.ivnsrg.aicontrolcentre.core.model.SettingsRepository
 import com.ivnsrg.aicontrolcentre.core.model.UiError
 import com.ivnsrg.aicontrolcentre.core.model.UiException
@@ -35,6 +37,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
@@ -50,19 +54,25 @@ class OpenRouterModelsRepository(
     private val service: OpenRouterService,
     private val settingsRepository: SettingsRepository,
 ) : ModelsRepository {
+    private val refreshMutex = Mutex()
+
     override suspend fun getCachedModels(): List<ModelCatalogEntry> =
-        modelsDao.getAll().map {
-            ModelCatalogEntry(
-                id = it.id,
-                provider = ModelProvider.valueOf(it.provider),
-                model = it.model,
-                label = it.label,
-                supportsChat = it.supportsChat,
-                supportsCompare = it.supportsCompare,
-            )
+        modelsDao.getAll().map(CachedModelEntity::toDomainModel)
+
+    override suspend fun refreshModels(forceRefresh: Boolean): List<ModelCatalogEntry> {
+        if (!forceRefresh) {
+            getFreshCachedModels()?.let { return it }
         }
 
-    override suspend fun refreshModels(): List<ModelCatalogEntry> {
+        return refreshMutex.withLock {
+            if (!forceRefresh) {
+                getFreshCachedModels()?.let { return@withLock it }
+            }
+            fetchRemoteModels()
+        }
+    }
+
+    private suspend fun fetchRemoteModels(): List<ModelCatalogEntry> {
         val apiKeys = settingsRepository.getApiKeys().ifEmpty {
             listOfNotNull(settingsRepository.getPrimaryApiKey())
         }
@@ -105,6 +115,54 @@ class OpenRouterModelsRepository(
 
         throw lastFailure?.toUiException() ?: UiException(UiError.MissingApiKey)
     }
+
+    private suspend fun getFreshCachedModels(): List<ModelCatalogEntry>? {
+        val cached = modelsDao.getAll()
+        if (cached.isEmpty()) return null
+
+        val newestCachedAt = cached.maxOf { it.cachedAt }
+        if (System.currentTimeMillis() - newestCachedAt > MODELS_CACHE_FRESHNESS_MS) {
+            return null
+        }
+
+        return cached.map(CachedModelEntity::toDomainModel)
+    }
+}
+
+class DefaultOpenRouterDiagnosticsRepository(
+    private val service: OpenRouterService,
+    private val settingsRepository: SettingsRepository,
+) : OpenRouterDiagnosticsRepository {
+    override suspend fun getCurrentKeyDiagnostics(): OpenRouterKeyDiagnostics {
+        val apiKeys = settingsRepository.getApiKeys().ifEmpty {
+            listOfNotNull(settingsRepository.getPrimaryApiKey())
+        }
+        if (apiKeys.isEmpty()) {
+            throw UiException(UiError.MissingApiKey)
+        }
+
+        var lastFailure: OpenRouterExecutionException? = null
+        apiKeys.forEachIndexed { index, apiKey ->
+            try {
+                val response = service.getCurrentKeyInfo(apiKey.toBearerToken())
+                val diagnostics = response.data?.toDomain()
+                    ?: throw OpenRouterExecutionException(
+                        uiError = UiError.Provider("OpenRouter не вернул данные по текущему API key"),
+                        shouldFailover = false,
+                    )
+                settingsRepository.promoteSuccessfulFallback(index, apiKey)
+                return diagnostics
+            } catch (throwable: Throwable) {
+                val failure = throwable.toModelsExecutionException()
+                lastFailure = failure
+                if (!failure.shouldFailover || index == apiKeys.lastIndex) {
+                    throw failure.toUiException()
+                }
+            }
+        }
+
+        throw lastFailure?.toUiException() ?: UiException(UiError.MissingApiKey)
+    }
 }
 
 class OpenRouterChatRepository internal constructor(
@@ -126,6 +184,13 @@ class OpenRouterChatRepository internal constructor(
         prompt: String,
         history: List<Message>,
     ): AssistantMessageDraft = completionExecutor.createCompletion(modelId, prompt, history)
+
+    override fun streamMessage(
+        threadId: Long,
+        modelId: String,
+        prompt: String,
+        history: List<Message>,
+    ): Flow<AssistantStreamEvent> = completionExecutor.streamCompletion(modelId, prompt, history)
 }
 
 class OpenRouterCompareRepository internal constructor(
@@ -238,7 +303,7 @@ private class OpenRouterCompletionExecutor(
         val latencyMs = measureTimeMillis {
             httpClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
-                    throw response.toExecutionException(json)
+                    throw response.toExecutionException(json, modelId)
                 }
                 val body = response.body?.string().orEmpty()
                 responseModel = json.decodeFromString(OpenRouterChatResponse.serializer(), body)
@@ -248,7 +313,7 @@ private class OpenRouterCompletionExecutor(
         responseModel?.toAssistantMessageDraft(modelId, latencyMs)
             ?: throw OpenRouterExecutionException(
                 uiError = UiError.Provider("Провайдер вернул пустой ответ"),
-                shouldFailover = true,
+                shouldFailover = false,
             )
     }
 
@@ -270,13 +335,13 @@ private class OpenRouterCompletionExecutor(
         val startTime = System.currentTimeMillis()
         httpClient.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
-                throw response.toExecutionException(json)
+                throw response.toExecutionException(json, modelId)
             }
 
             val source = response.body?.source()
                 ?: throw OpenRouterExecutionException(
                     uiError = UiError.Provider("Провайдер вернул пустой stream"),
-                    shouldFailover = true,
+                    shouldFailover = false,
                 )
 
             val state = StreamingAccumulator(modelId = modelId)
@@ -300,7 +365,7 @@ private class OpenRouterCompletionExecutor(
             if (!state.isDone) {
                 throw OpenRouterExecutionException(
                     uiError = UiError.Network("OpenRouter закрыл stream до завершения ответа"),
-                    shouldFailover = true,
+                    shouldFailover = false,
                 )
             }
 
@@ -413,7 +478,7 @@ private class StreamingAccumulator(
         }.getOrElse { throwable ->
             throw OpenRouterExecutionException(
                 uiError = UiError.Unknown(throwable.message ?: "Не удалось разобрать streaming-ответ"),
-                shouldFailover = true,
+                shouldFailover = false,
                 cause = throwable,
             )
         }
@@ -423,8 +488,8 @@ private class StreamingAccumulator(
 
         chunk.error?.message?.takeIf { it.isNotBlank() }?.let { message ->
             throw OpenRouterExecutionException(
-                uiError = chunk.error.toStreamUiError(message),
-                shouldFailover = true,
+                uiError = chunk.error.toStreamUiError(message, modelId),
+                shouldFailover = false,
             )
         }
 
@@ -453,7 +518,7 @@ private class StreamingAccumulator(
         if (finalContent.isBlank()) {
             throw OpenRouterExecutionException(
                 uiError = UiError.Provider("Провайдер вернул пустой ответ"),
-                shouldFailover = true,
+                shouldFailover = false,
             )
         }
         return AssistantMessageDraft(
@@ -491,7 +556,10 @@ private suspend fun SettingsRepository.promoteSuccessfulFallback(index: Int, api
     }
 }
 
-private fun Response.toExecutionException(json: Json): OpenRouterExecutionException {
+private fun Response.toExecutionException(
+    json: Json,
+    modelId: String? = null,
+): OpenRouterExecutionException {
     val code = code
     val rawBody = runCatching { body?.string().orEmpty() }.getOrDefault("")
     val providerMessage = rawBody.extractProviderMessage(json)
@@ -517,9 +585,14 @@ private fun Response.toExecutionException(json: Json): OpenRouterExecutionExcept
             shouldFailover = false,
         )
 
-        408, 429, 500, 502, 503 -> OpenRouterExecutionException(
+        429 -> OpenRouterExecutionException(
+            uiError = UiError.Network(rateLimitMessage(providerMessage, modelId, code)),
+            shouldFailover = false,
+        )
+
+        408, 500, 502, 503 -> OpenRouterExecutionException(
             uiError = UiError.Network(providerMessage ?: "Сервис OpenRouter временно недоступен ($code)"),
-            shouldFailover = true,
+            shouldFailover = false,
         )
 
         else -> OpenRouterExecutionException(
@@ -532,13 +605,17 @@ private fun Response.toExecutionException(json: Json): OpenRouterExecutionExcept
 private fun Throwable.toModelsExecutionException(): OpenRouterExecutionException =
     when (val ui = mapNetworkFailure(this).error) {
         UiError.MissingApiKey -> OpenRouterExecutionException(ui, shouldFailover = true, cause = this)
-        is UiError.Network -> OpenRouterExecutionException(ui, shouldFailover = true, cause = this)
-        is UiError.Provider -> OpenRouterExecutionException(
+        is UiError.Network -> OpenRouterExecutionException(
             ui,
-            shouldFailover = ui.message.contains("429") || ui.message.contains("credits", ignoreCase = true),
+            shouldFailover = false,
             cause = this,
         )
-        is UiError.Unknown -> OpenRouterExecutionException(ui, shouldFailover = true, cause = this)
+        is UiError.Provider -> OpenRouterExecutionException(
+            ui,
+            shouldFailover = ui.message.contains("credits", ignoreCase = true),
+            cause = this,
+        )
+        is UiError.Unknown -> OpenRouterExecutionException(ui, shouldFailover = false, cause = this)
         is UiError.Validation -> OpenRouterExecutionException(ui, shouldFailover = false, cause = this)
         UiError.None -> OpenRouterExecutionException(UiError.Unknown("Unknown error"), shouldFailover = false, cause = this)
     }
@@ -556,20 +633,50 @@ private fun String.extractProviderMessage(json: Json): String? =
 
 private fun com.ivnsrg.aicontrolcentre.data.network.dto.OpenRouterErrorDto.toStreamUiError(
     fallbackMessage: String,
+    modelId: String? = null,
 ): UiError {
     val normalizedCode = code.orEmpty().lowercase()
     return when {
-        "rate" in normalizedCode || "timeout" in normalizedCode || "server" in normalizedCode || "provider" in normalizedCode ->
+        "rate" in normalizedCode ->
+            UiError.Network(rateLimitMessage(message ?: fallbackMessage, modelId, null))
+
+        "timeout" in normalizedCode || "server" in normalizedCode || "provider" in normalizedCode ->
             UiError.Network(message ?: fallbackMessage)
 
         else -> UiError.Provider(message ?: fallbackMessage)
     }
 }
 
+private fun rateLimitMessage(
+    providerMessage: String?,
+    modelId: String?,
+    code: Int?,
+): String {
+    val baseMessage = providerMessage?.takeIf { it.isNotBlank() }
+        ?: "Сервис OpenRouter временно недоступен (${code ?: 429})"
+    return if (modelId.isFreeVariant()) {
+        "$baseMessage. Выбрана free-модель: у OpenRouter для :free действуют более жёсткие лимиты, включая 20 запросов в минуту и низкий дневной лимит. Попробуй позже, выбери модель без :free или добавь credits."
+    } else {
+        baseMessage
+    }
+}
+
+private fun String?.isFreeVariant(): Boolean = this?.endsWith(":free", ignoreCase = true) == true
+
 private fun String.toBearerToken(): String = "Bearer $this"
 
 private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
 private const val OPEN_ROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions"
+private const val MODELS_CACHE_FRESHNESS_MS = 6 * 60 * 60 * 1000L
+
+private fun CachedModelEntity.toDomainModel(): ModelCatalogEntry = ModelCatalogEntry(
+    id = id,
+    provider = ModelProvider.valueOf(provider),
+    model = model,
+    label = label,
+    supportsChat = supportsChat,
+    supportsCompare = supportsCompare,
+)
 
 fun createOpenRouterChatRepository(
     settingsRepository: SettingsRepository,
@@ -584,5 +691,13 @@ fun createOpenRouterCompareRepository(
 ): CompareRepository = OpenRouterCompareRepository(
     httpClient = OpenRouterNetworkFactory.createOkHttpClient(),
     json = OpenRouterNetworkFactory.createJson(),
+    settingsRepository = settingsRepository,
+)
+
+fun createOpenRouterDiagnosticsRepository(
+    service: OpenRouterService,
+    settingsRepository: SettingsRepository,
+): OpenRouterDiagnosticsRepository = DefaultOpenRouterDiagnosticsRepository(
+    service = service,
     settingsRepository = settingsRepository,
 )

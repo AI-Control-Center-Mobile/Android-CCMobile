@@ -1,8 +1,6 @@
 package com.ivnsrg.aicontrolcentre.feature.projects
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -11,60 +9,104 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.ivnsrg.aicontrolcentre.core.model.Message
 import com.ivnsrg.aicontrolcentre.core.model.Project
 import com.ivnsrg.aicontrolcentre.core.model.ProjectsRepository
 import com.ivnsrg.aicontrolcentre.core.model.Thread
 import com.ivnsrg.aicontrolcentre.core.model.ThreadsRepository
+import com.ivnsrg.aicontrolcentre.core.ui.components.AppCard
 import com.ivnsrg.aicontrolcentre.core.ui.components.AppScreenScaffold
 import com.ivnsrg.aicontrolcentre.core.ui.components.AppTextField
-import com.ivnsrg.aicontrolcentre.core.ui.components.BadgeTone
-import com.ivnsrg.aicontrolcentre.core.ui.components.CardTone
+import com.ivnsrg.aicontrolcentre.core.ui.components.AssistantMarkdownPreview
 import com.ivnsrg.aicontrolcentre.core.ui.components.CompactActionButton
-import com.ivnsrg.aicontrolcentre.core.ui.components.ConfirmDialog
 import com.ivnsrg.aicontrolcentre.core.ui.components.EmptyState
-import com.ivnsrg.aicontrolcentre.core.ui.components.HeaderDensity
+import com.ivnsrg.aicontrolcentre.core.ui.components.KeyValueRow
 import com.ivnsrg.aicontrolcentre.core.ui.components.MetadataChip
-import com.ivnsrg.aicontrolcentre.core.ui.components.MetricTile
-import com.ivnsrg.aicontrolcentre.core.ui.components.OperationalCard
 import com.ivnsrg.aicontrolcentre.core.ui.components.PrimaryButton
-import com.ivnsrg.aicontrolcentre.core.ui.components.SectionLabel
-import com.ivnsrg.aicontrolcentre.core.ui.theme.appColors
+import com.ivnsrg.aicontrolcentre.core.ui.components.SectionHeader
+import com.ivnsrg.aicontrolcentre.core.ui.theme.LocalSpacing
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import java.text.DecimalFormat
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+data class ProjectCardUiModel(
+    val id: Long,
+    val title: String,
+    val lastActivityLabel: String,
+    val updatedAt: Long,
+)
+
+data class ThreadRowUiModel(
+    val id: Long,
+    val title: String,
+    val preview: String,
+    val lastActivityLabel: String,
+    val messageCount: Int,
+    val totalCost: Double,
+    val updatedAt: Long,
+)
+
+data class ProjectHeaderUiModel(
+    val messageCount: Int = 0,
+    val totalSpend: Double = 0.0,
+    val lastActivityLabel: String = "No activity yet",
+)
+
 data class ProjectsUiState(
     val draftTitle: String = "",
+    val isCreating: Boolean = false,
+)
+
+data class ProjectsScreenState(
+    val projects: List<ProjectCardUiModel> = emptyList(),
+    val isLoading: Boolean = true,
+)
+
+data class ProjectDetailUiState(
+    val title: String = "Project",
+    val isLoading: Boolean = true,
+    val summary: ProjectHeaderUiModel = ProjectHeaderUiModel(),
+    val threads: List<ThreadRowUiModel> = emptyList(),
 )
 
 class ProjectsViewModel(
     private val projectsRepository: ProjectsRepository,
 ) : ViewModel() {
-    val projects = projectsRepository.observeProjects()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    val screenState: StateFlow<ProjectsScreenState> = projectsRepository.observeProjects()
+        .map { projects ->
+            ProjectsScreenState(
+                projects = projects.map(::toProjectCard).sortedByDescending(ProjectCardUiModel::updatedAt),
+                isLoading = false,
+            )
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ProjectsScreenState())
 
     private val _uiState = MutableStateFlow(ProjectsUiState())
     val uiState: StateFlow<ProjectsUiState> = _uiState.asStateFlow()
@@ -77,15 +119,10 @@ class ProjectsViewModel(
         val title = _uiState.value.draftTitle.trim()
         if (title.isBlank()) return
         viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isCreating = true)
             val id = projectsRepository.createProject(title)
             _uiState.value = ProjectsUiState()
             onCreated(id)
-        }
-    }
-
-    fun deleteProject(projectId: Long) {
-        viewModelScope.launch {
-            projectsRepository.deleteProject(projectId)
         }
     }
 }
@@ -93,12 +130,9 @@ class ProjectsViewModel(
 class ProjectsViewModelFactory(
     private val projectsRepository: ProjectsRepository,
 ) : ViewModelProvider.Factory {
+    @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
-        if (modelClass.isAssignableFrom(ProjectsViewModel::class.java)) {
-            @Suppress("UNCHECKED_CAST")
-            return ProjectsViewModel(projectsRepository) as T
-        }
-        throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
+        return ProjectsViewModel(projectsRepository) as T
     }
 }
 
@@ -107,192 +141,50 @@ fun ProjectsRoute(
     projectsRepository: ProjectsRepository,
     onProjectClick: (Long) -> Unit,
 ) {
-    val viewModel: ProjectsViewModel = viewModel(factory = ProjectsViewModelFactory(projectsRepository))
-    val projects by viewModel.projects.collectAsState()
+    val viewModel: ProjectsViewModel = viewModel(
+        factory = ProjectsViewModelFactory(projectsRepository),
+    )
+    val screenState by viewModel.screenState.collectAsState()
     val uiState by viewModel.uiState.collectAsState()
 
     ProjectsScreen(
-        projects = projects,
+        screenState = screenState,
         draftTitle = uiState.draftTitle,
+        isCreating = uiState.isCreating,
         onDraftTitleChange = viewModel::updateDraftTitle,
         onCreateProject = { viewModel.createProject(onProjectClick) },
-        onDeleteProject = viewModel::deleteProject,
         onProjectClick = onProjectClick,
     )
 }
-
-@Composable
-fun ProjectsScreen(
-    projects: List<Project>,
-    draftTitle: String,
-    onDraftTitleChange: (String) -> Unit,
-    onCreateProject: () -> Unit,
-    onDeleteProject: (Long) -> Unit,
-    onProjectClick: (Long) -> Unit,
-) {
-    var pendingDeleteProjectId by remember { mutableStateOf<Long?>(null) }
-    val pendingProject = projects.firstOrNull { it.id == pendingDeleteProjectId }
-
-    if (pendingProject != null) {
-        ConfirmDialog(
-            title = "Удалить проект?",
-            message = "Проект \"${pendingProject.title}\" будет удалён вместе со всеми тредами и сообщениями.",
-            confirmText = "Удалить",
-            onConfirm = {
-                onDeleteProject(pendingProject.id)
-                pendingDeleteProjectId = null
-            },
-            onDismiss = { pendingDeleteProjectId = null },
-        )
-    }
-
-    AppScreenScaffold(
-        title = "Projects",
-        subtitle = "Local-first operational controller",
-        headerDensity = HeaderDensity.Compact,
-    ) { padding ->
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .padding(horizontal = 20.dp),
-            verticalArrangement = Arrangement.spacedBy(18.dp),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp),
-        ) {
-            item {
-                OperationalCard(
-                    tone = CardTone.Surface2,
-                ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        SectionLabel("Create workspace", tone = com.ivnsrg.aicontrolcentre.core.ui.components.BadgeTone.Primary)
-                        AppTextField(
-                            value = draftTitle,
-                            onValueChange = onDraftTitleChange,
-                            label = "Project title",
-                        )
-                        PrimaryButton(text = "Create project", onClick = onCreateProject)
-                    }
-                }
-            }
-
-            item {
-                SectionLabel("Active workspaces")
-            }
-
-            if (projects.isEmpty()) {
-                item {
-                    EmptyState(
-                        title = "No workspaces yet",
-                        subtitle = "Create the first workspace to start storing local AI threads and comparisons.",
-                    )
-                }
-            } else {
-                itemsIndexed(projects, key = { _, project -> project.id }) { index, project ->
-                    ProjectListItem(
-                        project = project,
-                        highlight = index == 0,
-                        onClick = { onProjectClick(project.id) },
-                        onLongClick = { pendingDeleteProjectId = project.id },
-                    )
-                }
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun ProjectListItem(
-    project: Project,
-    highlight: Boolean,
-    onClick: () -> Unit,
-    onLongClick: () -> Unit,
-) {
-    val colors = MaterialTheme.appColors
-    OperationalCard(
-        modifier = Modifier.combinedClickable(
-            onClick = onClick,
-            onLongClick = onLongClick,
-        ),
-        tone = CardTone.Surface1,
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(
-                    text = project.title,
-                    style = MaterialTheme.typography.titleLarge,
-                    color = colors.textPrimary,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    MetadataChip(text = if (highlight) "ACTIVE" else "LOCAL")
-                    MetadataChip(
-                        text = formatTimestamp(project.updatedAt),
-                        tone = com.ivnsrg.aicontrolcentre.core.ui.components.BadgeTone.Info,
-                    )
-                }
-            }
-            Text(
-                text = ">",
-                style = MaterialTheme.typography.titleLarge,
-                color = if (highlight) colors.accentPrimary else colors.textMuted,
-            )
-        }
-    }
-}
-
-data class ProjectDetailUiState(
-    val project: Project? = null,
-    val createThreadError: String? = null,
-)
 
 class ProjectDetailViewModel(
     private val projectId: Long,
     private val projectsRepository: ProjectsRepository,
     private val threadsRepository: ThreadsRepository,
 ) : ViewModel() {
-    val threads = threadsRepository.observeThreads(projectId)
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
-
-    private val _uiState = MutableStateFlow(ProjectDetailUiState())
-    val uiState: StateFlow<ProjectDetailUiState> = _uiState.asStateFlow()
-
-    init {
-        viewModelScope.launch {
-            _uiState.value = ProjectDetailUiState(projectsRepository.getProject(projectId))
-        }
-    }
+    val uiState: StateFlow<ProjectDetailUiState> = combine(
+        projectsRepository.observeProjects().map { projects -> projects.firstOrNull { it.id == projectId } },
+        observeThreadRows(projectId, threadsRepository),
+    ) { project, threadRows ->
+        val totalSpend = threadRows.sumOf { it.totalCost }
+        val messageCount = threadRows.sumOf { it.messageCount }
+        val latestUpdatedAt = listOfNotNull(project?.updatedAt, threadRows.maxOfOrNull { it.updatedAt }).maxOrNull()
+        ProjectDetailUiState(
+            title = project?.title ?: "Project",
+            isLoading = project == null,
+            summary = ProjectHeaderUiModel(
+                messageCount = messageCount,
+                totalSpend = totalSpend,
+                lastActivityLabel = latestUpdatedAt?.let(::formatAbsoluteDateTime) ?: "No activity yet",
+            ),
+            threads = threadRows.sortedByDescending(ThreadRowUiModel::updatedAt),
+        )
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ProjectDetailUiState())
 
     fun createThread(onCreated: (Long) -> Unit) {
         viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(createThreadError = null)
-            val project = projectsRepository.getProject(projectId)
-            if (project == null) {
-                _uiState.value = _uiState.value.copy(
-                    project = null,
-                    createThreadError = "Project was removed. Go back and choose another workspace.",
-                )
-                return@launch
-            }
-
-            runCatching {
-                threadsRepository.createThread(projectId)
-            }.onSuccess { threadId ->
-                onCreated(threadId)
-            }.onFailure {
-                _uiState.value = _uiState.value.copy(
-                    createThreadError = "Could not start a thread for this project. Refresh Projects and try again.",
-                )
-            }
-        }
-    }
-
-    fun deleteThread(threadId: Long) {
-        viewModelScope.launch {
-            threadsRepository.deleteThread(threadId)
+            val threadId = threadsRepository.createThread(projectId)
+            onCreated(threadId)
         }
     }
 }
@@ -302,12 +194,9 @@ class ProjectDetailViewModelFactory(
     private val projectsRepository: ProjectsRepository,
     private val threadsRepository: ThreadsRepository,
 ) : ViewModelProvider.Factory {
+    @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
-        if (modelClass.isAssignableFrom(ProjectDetailViewModel::class.java)) {
-            @Suppress("UNCHECKED_CAST")
-            return ProjectDetailViewModel(projectId, projectsRepository, threadsRepository) as T
-        }
-        throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
+        return ProjectDetailViewModel(projectId, projectsRepository, threadsRepository) as T
     }
 }
 
@@ -323,183 +212,296 @@ fun ProjectDetailRoute(
         factory = ProjectDetailViewModelFactory(projectId, projectsRepository, threadsRepository),
     )
     val uiState by viewModel.uiState.collectAsState()
-    val threads by viewModel.threads.collectAsState()
 
     ProjectDetailScreen(
-        project = uiState.project,
-        createThreadError = uiState.createThreadError,
-        threads = threads,
+        uiState = uiState,
         onBack = onBack,
         onNewThreadClick = { viewModel.createThread(onThreadClick) },
-        onDeleteThread = viewModel::deleteThread,
         onThreadClick = onThreadClick,
     )
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun ProjectDetailScreen(
-    project: Project?,
-    createThreadError: String?,
-    threads: List<Thread>,
-    onBack: () -> Unit,
-    onNewThreadClick: () -> Unit,
-    onDeleteThread: (Long) -> Unit,
-    onThreadClick: (Long) -> Unit,
+fun ProjectsScreen(
+    screenState: ProjectsScreenState,
+    draftTitle: String,
+    isCreating: Boolean,
+    onDraftTitleChange: (String) -> Unit,
+    onCreateProject: () -> Unit,
+    onProjectClick: (Long) -> Unit,
 ) {
-    val colors = MaterialTheme.appColors
-    var pendingDeleteThreadId by remember { mutableStateOf<Long?>(null) }
-    val pendingThread = threads.firstOrNull { it.id == pendingDeleteThreadId }
-
-    if (pendingThread != null) {
-        ConfirmDialog(
-            title = "Удалить тред?",
-            message = "Тред \"${pendingThread.title}\" будет удалён вместе со всеми сообщениями.",
-            confirmText = "Удалить",
-            onConfirm = {
-                onDeleteThread(pendingThread.id)
-                pendingDeleteThreadId = null
-            },
-            onDismiss = { pendingDeleteThreadId = null },
-        )
-    }
+    val spacing = LocalSpacing.current
 
     AppScreenScaffold(
-        title = "",
-        headerDensity = HeaderDensity.Compact,
-        topBar = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    CompactActionButton(text = "Back", onClick = onBack)
-                    MetadataChip(text = "PROJECT", tone = BadgeTone.Info)
-                }
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(
-                        text = project?.title ?: "Workspace",
-                        style = MaterialTheme.typography.headlineSmall,
-                        color = colors.textPrimary,
-                    )
-                    Text(
-                        text = "Project-centric thread workspace",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = colors.textSecondary,
-                    )
-                }
-            }
-        },
+        title = "Projects",
+        subtitle = "Project-centric local workspaces for AI threads.",
     ) { padding ->
-        LazyColumn(
+        Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
                 .padding(horizontal = 20.dp),
-            verticalArrangement = Arrangement.spacedBy(18.dp),
-            contentPadding = PaddingValues(bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(spacing.md),
         ) {
-            item {
-                OperationalCard(
-                    tone = CardTone.Surface3,
-                ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-                            MetricTile(
-                                label = "Threads",
-                                value = threads.size.toString(),
-                                modifier = Modifier.weight(1f),
-                            )
-                            MetricTile(
-                                label = "Updated",
-                                value = project?.updatedAt?.let(::formatShortDate) ?: "n/a",
-                                modifier = Modifier.weight(1f),
-                                tone = com.ivnsrg.aicontrolcentre.core.ui.components.BadgeTone.Info,
-                            )
-                        }
-                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            SectionLabel("Last activity")
-                            Text(
-                                text = project?.updatedAt?.let(::formatTimestamp) ?: "No activity yet",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = colors.textSecondary,
-                            )
-                        }
-                    }
-                }
-            }
-            createThreadError?.let { message ->
-                item {
-                    OperationalCard(tone = CardTone.Danger) {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            SectionLabel("Thread issue", tone = BadgeTone.Danger)
-                            Text(
-                                text = message,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = colors.textSecondary,
-                            )
-                        }
-                    }
-                }
-            }
-            item {
-                SectionLabel("Recent threads")
-            }
-
-            if (threads.isEmpty()) {
-                item {
-                    EmptyState(
-                        title = "No threads in this workspace",
-                        subtitle = "Create the first thread and continue inside the project flow.",
-                    )
-                }
-            } else {
-                itemsIndexed(threads, key = { _, thread -> thread.id }) { index, thread ->
-                    OperationalCard(
-                        modifier = Modifier
-                            .combinedClickable(
-                                onClick = { onThreadClick(thread.id) },
-                                onLongClick = { pendingDeleteThreadId = thread.id },
-                            ),
-                        tone = CardTone.Surface1,
-                    ) {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text(
-                                text = thread.title,
-                                style = MaterialTheme.typography.titleMedium,
-                                color = colors.textPrimary,
-                            )
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                MetadataChip(
-                                    text = formatTimestamp(thread.updatedAt),
-                                    tone = com.ivnsrg.aicontrolcentre.core.ui.components.BadgeTone.Info,
-                                )
-                                if (index == 0) {
-                                    MetadataChip(
-                                        text = "Recent",
-                                        tone = com.ivnsrg.aicontrolcentre.core.ui.components.BadgeTone.Primary,
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            item {
-                PrimaryButton(
-                    text = "Start New Thread",
-                    onClick = onNewThreadClick,
-                    enabled = project != null,
+            AppCard {
+                SectionHeader(title = "CREATE WORKSPACE")
+                AppTextField(
+                    value = draftTitle,
+                    onValueChange = onDraftTitleChange,
+                    label = "Project title",
+                    placeholder = "UI System Refactor",
+                    enabled = !isCreating,
                 )
+                PrimaryButton(
+                    text = if (isCreating) "Creating..." else "Create Project",
+                    onClick = onCreateProject,
+                    enabled = !isCreating,
+                )
+            }
+
+            SectionHeader(title = "ACTIVE WORKSPACES")
+
+            if (screenState.projects.isEmpty()) {
+                EmptyState(
+                    title = "No projects yet",
+                    subtitle = "Create your first project to organize threads and local chat history.",
+                )
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(bottom = spacing.xxl),
+                    verticalArrangement = Arrangement.spacedBy(spacing.sm),
+                ) {
+                    items(screenState.projects, key = { it.id }) { project ->
+                        ProjectCard(
+                            project = project,
+                            onClick = { onProjectClick(project.id) },
+                        )
+                    }
+                }
             }
         }
     }
 }
 
-private fun formatTimestamp(timestamp: Long): String =
-    SimpleDateFormat("dd MMM • HH:mm", Locale.US).format(Date(timestamp))
+@Composable
+fun ProjectDetailScreen(
+    uiState: ProjectDetailUiState,
+    onBack: () -> Unit,
+    onNewThreadClick: () -> Unit,
+    onThreadClick: (Long) -> Unit,
+) {
+    val spacing = LocalSpacing.current
 
-private fun formatShortDate(timestamp: Long): String =
-    SimpleDateFormat("dd MMM", Locale.US).format(Date(timestamp))
+    AppScreenScaffold(
+        title = uiState.title,
+        subtitle = "Review recent threads and start a new conversation.",
+        topBar = {
+            Column(verticalArrangement = Arrangement.spacedBy(spacing.sm)) {
+                CompactActionButton(text = "Back", onClick = onBack)
+                Text(
+                    text = uiState.title,
+                    style = MaterialTheme.typography.headlineSmall,
+                )
+                Text(
+                    text = "Review recent threads and start a new conversation.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(horizontal = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(spacing.md),
+        ) {
+            AppCard {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(spacing.md),
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        KeyValueRow(label = "Messages", value = uiState.summary.messageCount.toString())
+                        KeyValueRow(label = "Total Spend", value = formatCost(uiState.summary.totalSpend))
+                    }
+                }
+                Text(
+                    text = "Last Activity",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = uiState.summary.lastActivityLabel,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+
+            PrimaryButton(text = "Start New Thread", onClick = onNewThreadClick)
+            SectionHeader(title = "RECENT THREADS")
+
+            if (uiState.threads.isEmpty()) {
+                EmptyState(
+                    title = "No threads in this project",
+                    subtitle = "Start a thread here, then your teammate can wire in the chat flow.",
+                )
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(bottom = spacing.xxl),
+                    verticalArrangement = Arrangement.spacedBy(spacing.sm),
+                ) {
+                    items(uiState.threads, key = { it.id }) { thread ->
+                        ThreadRowCard(thread = thread, onClick = { onThreadClick(thread.id) })
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProjectCard(
+    project: ProjectCardUiModel,
+    onClick: () -> Unit,
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        shape = CardDefaults.shape,
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface,
+            contentColor = MaterialTheme.colorScheme.onSurface,
+        ),
+        border = CardDefaults.outlinedCardBorder(),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(project.title, style = MaterialTheme.typography.titleLarge)
+            MetadataChip(text = "LOCAL WORKSPACE")
+            Text(
+                text = project.lastActivityLabel,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
+private fun ThreadRowCard(
+    thread: ThreadRowUiModel,
+    onClick: () -> Unit,
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface,
+            contentColor = MaterialTheme.colorScheme.onSurface,
+        ),
+        border = CardDefaults.outlinedCardBorder(),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(thread.title, style = MaterialTheme.typography.titleMedium)
+                Text(
+                    text = thread.lastActivityLabel,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            AssistantMarkdownPreview(content = thread.preview, maxLines = 4)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                MetadataChip(text = "${thread.messageCount} MSG")
+                MetadataChip(text = formatCost(thread.totalCost))
+            }
+        }
+    }
+}
+
+private fun toProjectCard(project: Project): ProjectCardUiModel = ProjectCardUiModel(
+    id = project.id,
+    title = project.title,
+    lastActivityLabel = formatRelativeDateTime(project.updatedAt),
+    updatedAt = project.updatedAt,
+)
+
+@OptIn(ExperimentalCoroutinesApi::class)
+private fun observeThreadRows(
+    projectId: Long,
+    threadsRepository: ThreadsRepository,
+): Flow<List<ThreadRowUiModel>> {
+    return threadsRepository.observeThreads(projectId).flatMapLatest { threads ->
+        if (threads.isEmpty()) {
+            flowOf(emptyList())
+        } else {
+            combine(threads.map { thread -> observeThreadRow(thread, threadsRepository) }) { rows ->
+                rows.toList()
+            }
+        }
+    }
+}
+
+private fun observeThreadRow(
+    thread: Thread,
+    threadsRepository: ThreadsRepository,
+): Flow<ThreadRowUiModel> {
+    return threadsRepository.observeMessages(thread.id).map { messages ->
+        buildThreadRow(thread, messages)
+    }
+}
+
+private fun buildThreadRow(
+    thread: Thread,
+    messages: List<Message>,
+): ThreadRowUiModel {
+    val lastMessage = messages.lastOrNull()
+    val updatedAt = maxOf(thread.updatedAt, lastMessage?.createdAt ?: 0L)
+    return ThreadRowUiModel(
+        id = thread.id,
+        title = thread.title,
+        preview = lastMessage?.content?.trim().orEmpty().ifBlank { "No messages yet. Use this thread to continue the chat flow." },
+        lastActivityLabel = if (updatedAt > 0L) formatRelativeDateTime(updatedAt) else "Idle",
+        messageCount = messages.size,
+        totalCost = messages.sumOf { it.estimatedCost ?: 0.0 },
+        updatedAt = updatedAt.takeIf { it > 0L } ?: thread.updatedAt,
+    )
+}
+
+private fun formatCost(value: Double): String {
+    val formatter = DecimalFormat("$0.0000")
+    return formatter.format(value)
+}
+
+private fun formatRelativeDateTime(timestamp: Long): String {
+    val now = System.currentTimeMillis()
+    val diff = now - timestamp
+    val minute = 60_000L
+    val hour = 60 * minute
+    val day = 24 * hour
+
+    return when {
+        diff < minute -> "Just now"
+        diff < hour -> "${diff / minute} min ago"
+        diff < day -> "${diff / hour} h ago"
+        diff < day * 2 -> "Yesterday"
+        else -> SimpleDateFormat("dd MMM", Locale.US).format(Date(timestamp))
+    }
+}
+
+private fun formatAbsoluteDateTime(timestamp: Long): String {
+    return SimpleDateFormat("dd MMM, HH:mm", Locale.US).format(Date(timestamp))
+}

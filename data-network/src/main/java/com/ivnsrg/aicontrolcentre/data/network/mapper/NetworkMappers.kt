@@ -3,9 +3,11 @@ package com.ivnsrg.aicontrolcentre.data.network.mapper
 import com.ivnsrg.aicontrolcentre.core.model.AssistantMessageDraft
 import com.ivnsrg.aicontrolcentre.core.model.ModelCatalogEntry
 import com.ivnsrg.aicontrolcentre.core.model.ModelProvider
+import com.ivnsrg.aicontrolcentre.core.model.OpenRouterKeyDiagnostics
 import com.ivnsrg.aicontrolcentre.core.model.UiError
 import com.ivnsrg.aicontrolcentre.core.model.UiException
 import com.ivnsrg.aicontrolcentre.data.network.dto.OpenRouterChatResponse
+import com.ivnsrg.aicontrolcentre.data.network.dto.OpenRouterKeyInfoDto
 import com.ivnsrg.aicontrolcentre.data.network.dto.OpenRouterModelDto
 import retrofit2.HttpException
 import java.io.IOException
@@ -17,6 +19,14 @@ fun OpenRouterModelDto.toDomain() = ModelCatalogEntry(
     label = name ?: id,
     supportsChat = true,
     supportsCompare = true,
+)
+
+fun OpenRouterKeyInfoDto.toDomain(): OpenRouterKeyDiagnostics = OpenRouterKeyDiagnostics(
+    label = label,
+    isFreeTier = isFreeTier,
+    limitRemaining = limitRemaining ?: limit,
+    usageDaily = usageDaily ?: 0.0,
+    limitReset = limitReset,
 )
 
 fun OpenRouterChatResponse.toAssistantMessageDraft(

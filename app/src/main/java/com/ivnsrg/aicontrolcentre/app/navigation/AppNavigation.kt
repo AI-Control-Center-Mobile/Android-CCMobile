@@ -2,9 +2,11 @@ package com.ivnsrg.aicontrolcentre.app.navigation
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
@@ -124,6 +126,7 @@ fun AiControlCentreNavHost() {
             ) {
                 SettingsRoute(
                     settingsRepository = container.settingsRepository,
+                    diagnosticsRepository = container.openRouterDiagnosticsRepository,
                     onApiKeyRemoved = {
                         navController.navigate(AppRoute.SETUP) {
                             popUpTo(navController.graph.id) {
@@ -302,10 +305,23 @@ private fun ScreenWithBottomBar(
     content: @Composable () -> Unit,
 ) {
     val bottomBarRoutes = navItems.map { it.route }.toSet() + AppRoute.PROJECT
-    androidx.compose.material3.Scaffold(
-        containerColor = androidx.compose.ui.graphics.Color.Transparent,
-        bottomBar = {
-            if (currentRoute in bottomBarRoutes) {
+    val showBottomBar = currentRoute in bottomBarRoutes
+
+    Box(
+        modifier = Modifier.fillMaxSize(),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(bottom = if (showBottomBar) 96.dp else 0.dp),
+        ) {
+            content()
+        }
+
+        if (showBottomBar) {
+            Box(
+                modifier = Modifier.align(Alignment.BottomCenter),
+            ) {
                 FloatingBottomBarContainer {
                     FloatingNavItem(
                         icon = Icons.Default.Home,
@@ -327,12 +343,6 @@ private fun ScreenWithBottomBar(
                     )
                 }
             }
-        },
-    ) { innerPadding ->
-        androidx.compose.foundation.layout.Box(
-            modifier = Modifier.padding(innerPadding),
-        ) {
-            content()
         }
     }
 }

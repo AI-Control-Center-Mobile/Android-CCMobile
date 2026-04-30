@@ -4,6 +4,7 @@ import android.content.Context
 import com.ivnsrg.aicontrolcentre.core.model.ChatRepository
 import com.ivnsrg.aicontrolcentre.core.model.CompareRepository
 import com.ivnsrg.aicontrolcentre.core.model.ModelsRepository
+import com.ivnsrg.aicontrolcentre.core.model.OpenRouterDiagnosticsRepository
 import com.ivnsrg.aicontrolcentre.core.model.ProjectsRepository
 import com.ivnsrg.aicontrolcentre.core.model.SettingsRepository
 import com.ivnsrg.aicontrolcentre.core.model.ThreadsRepository
@@ -12,6 +13,7 @@ import com.ivnsrg.aicontrolcentre.data.network.api.OpenRouterService
 import com.ivnsrg.aicontrolcentre.data.network.repository.OpenRouterModelsRepository
 import com.ivnsrg.aicontrolcentre.data.network.repository.createOpenRouterChatRepository
 import com.ivnsrg.aicontrolcentre.data.network.repository.createOpenRouterCompareRepository
+import com.ivnsrg.aicontrolcentre.data.network.repository.createOpenRouterDiagnosticsRepository
 import com.ivnsrg.aicontrolcentre.data.storage.db.AppDatabase
 import com.ivnsrg.aicontrolcentre.data.storage.db.AppDatabaseFactory
 import com.ivnsrg.aicontrolcentre.data.storage.preferences.AppPreferencesStore
@@ -24,6 +26,7 @@ interface AppContainer {
     val projectsRepository: ProjectsRepository
     val threadsRepository: ThreadsRepository
     val settingsRepository: SettingsRepository
+    val openRouterDiagnosticsRepository: OpenRouterDiagnosticsRepository
     val modelsRepository: ModelsRepository
     val chatRepository: ChatRepository
     val compareRepository: CompareRepository
@@ -52,6 +55,9 @@ class DefaultAppContainer(
     }
     override val settingsRepository: SettingsRepository by lazy {
         DefaultSettingsRepository(database, secureApiKeyStorage, preferencesStore)
+    }
+    override val openRouterDiagnosticsRepository: OpenRouterDiagnosticsRepository by lazy {
+        createOpenRouterDiagnosticsRepository(openRouterService, settingsRepository)
     }
     override val modelsRepository: ModelsRepository by lazy {
         OpenRouterModelsRepository(database.modelsDao(), openRouterService, settingsRepository)

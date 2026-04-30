@@ -74,7 +74,7 @@ class ModelPickerViewModel(
         _uiState.update { it.copy(query = value) }
     }
 
-    fun refresh() {
+    fun refresh(forceRefresh: Boolean = false) {
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, error = UiError.None) }
             if (settingsRepository.getApiKey().isNullOrBlank()) {
@@ -83,7 +83,7 @@ class ModelPickerViewModel(
             }
 
             try {
-                val remote = modelsRepository.refreshModels()
+                val remote = modelsRepository.refreshModels(forceRefresh = forceRefresh)
                 val filtered = remote.filterForMode(mode)
                 val models = if (filtered.isNotEmpty()) filtered else modelsRepository.getCachedModels().filterForMode(mode)
                 _uiState.update {
@@ -155,7 +155,7 @@ fun ModelPickerRoute(
         mode = mode,
         uiState = uiState,
         onQueryChange = viewModel::updateQuery,
-        onRetry = viewModel::refresh,
+        onRetry = { viewModel.refresh(forceRefresh = true) },
         onBack = onBack,
         onModelSelected = onModelSelected,
     )

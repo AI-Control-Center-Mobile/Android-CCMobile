@@ -51,6 +51,14 @@ data class CompareRequestUiModel(
     val prompt: String,
 )
 
+data class OpenRouterKeyDiagnostics(
+    val label: String? = null,
+    val isFreeTier: Boolean = true,
+    val limitRemaining: Double? = null,
+    val usageDaily: Double = 0.0,
+    val limitReset: String? = null,
+)
+
 data class AssistantMessageDraft(
     val content: String,
     val provider: ModelProvider,
@@ -161,7 +169,11 @@ interface SettingsRepository {
 
 interface ModelsRepository {
     suspend fun getCachedModels(): List<ModelCatalogEntry>
-    suspend fun refreshModels(): List<ModelCatalogEntry>
+    suspend fun refreshModels(forceRefresh: Boolean = false): List<ModelCatalogEntry>
+}
+
+interface OpenRouterDiagnosticsRepository {
+    suspend fun getCurrentKeyDiagnostics(): OpenRouterKeyDiagnostics
 }
 
 interface ChatRepository {
@@ -171,6 +183,13 @@ interface ChatRepository {
         prompt: String,
         history: List<Message>,
     ): AssistantMessageDraft
+
+    fun streamMessage(
+        threadId: Long,
+        modelId: String,
+        prompt: String,
+        history: List<Message>,
+    ): Flow<AssistantStreamEvent>
 }
 
 interface CompareRepository {

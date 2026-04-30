@@ -4,6 +4,7 @@ import com.ivnsrg.aicontrolcentre.core.model.AssistantStreamEvent
 import com.ivnsrg.aicontrolcentre.core.model.Message
 import com.ivnsrg.aicontrolcentre.core.model.MessageRole
 import com.ivnsrg.aicontrolcentre.core.model.ModelProvider
+import com.ivnsrg.aicontrolcentre.core.model.OpenRouterKeyDiagnostics
 import com.ivnsrg.aicontrolcentre.core.model.SettingsRepository
 import com.ivnsrg.aicontrolcentre.core.model.UiError
 import com.ivnsrg.aicontrolcentre.core.model.UiException
@@ -11,16 +12,22 @@ import com.ivnsrg.aicontrolcentre.data.network.api.OpenRouterNetworkFactory
 import com.ivnsrg.aicontrolcentre.data.network.api.OpenRouterService
 import com.ivnsrg.aicontrolcentre.data.network.dto.OpenRouterChoiceDto
 import com.ivnsrg.aicontrolcentre.data.network.dto.OpenRouterChatResponse
+import com.ivnsrg.aicontrolcentre.data.network.dto.OpenRouterKeyInfoDto
+import com.ivnsrg.aicontrolcentre.data.network.dto.OpenRouterKeyInfoResponse
 import com.ivnsrg.aicontrolcentre.data.network.dto.OpenRouterMessageDto
 import com.ivnsrg.aicontrolcentre.data.network.dto.OpenRouterModelDto
 import com.ivnsrg.aicontrolcentre.data.network.dto.OpenRouterModelsResponse
 import com.ivnsrg.aicontrolcentre.data.network.dto.OpenRouterUsageDto
 import com.ivnsrg.aicontrolcentre.data.network.repository.OpenRouterChatRepository
 import com.ivnsrg.aicontrolcentre.data.network.repository.OpenRouterCompareRepository
+import com.ivnsrg.aicontrolcentre.data.network.repository.DefaultOpenRouterDiagnosticsRepository
 import com.ivnsrg.aicontrolcentre.data.network.repository.OpenRouterModelsRepository
 import com.ivnsrg.aicontrolcentre.data.network.repository.buildOpenRouterMessages
 import com.ivnsrg.aicontrolcentre.data.storage.dao.ModelsDao
 import com.ivnsrg.aicontrolcentre.data.storage.entity.CachedModelEntity
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.Dispatcher
@@ -198,7 +205,72 @@ class NetworkMappersTest {
     }
 
     @Test
-    fun `stream retries on mid stream error and completes with second key`() = runBlocking {
+    fun `chat repository includes free tier hint on rate limit for free model`() = runBlocking {
+        val server = MockWebServer()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = jsonError(429, "Rate limit exceeded")
+        }
+        server.start()
+
+        try {
+            val repository = createChatRepository(
+                settingsRepository = FakeSettingsRepository(apiKeys = listOf("good-key")),
+                baseUrl = server.url("/chat/completions").toString(),
+            )
+
+            try {
+                repository.sendMessage(
+                    threadId = 1L,
+                    modelId = "google/gemma-3n:free",
+                    prompt = "Hi",
+                    history = emptyList(),
+                )
+                fail("Expected UiException")
+            } catch (exception: UiException) {
+                val error = exception.error as UiError.Network
+                assertTrue(error.message.contains("free-модель"))
+                assertTrue(error.message.contains("Rate limit exceeded"))
+            }
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `chat repository streams response and completes`() = runBlocking {
+        val server = MockWebServer()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = streamSuccess(
+                model = "anthropic/claude-3.5-sonnet",
+                content = "Streaming answer",
+            )
+        }
+        server.start()
+
+        try {
+            val repository = createChatRepository(
+                settingsRepository = FakeSettingsRepository(apiKeys = listOf("good-key")),
+                baseUrl = server.url("/chat/completions").toString(),
+            )
+
+            val events = repository.streamMessage(
+                threadId = 1L,
+                modelId = "anthropic/claude-3.5-sonnet",
+                prompt = "Hi",
+                history = emptyList(),
+            ).toList()
+
+            assertTrue(events.first() is AssistantStreamEvent.Streaming)
+            val completed = events.last() as AssistantStreamEvent.Completed
+            assertEquals("Streaming answer", completed.draft.content)
+            assertEquals(1, server.requestCount)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `stream does not fail over on mid stream error`() = runBlocking {
         val server = MockWebServer()
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse = when (request.getHeader("Authorization")) {
@@ -215,17 +287,18 @@ class NetworkMappersTest {
                 baseUrl = server.url("/chat/completions").toString(),
             )
 
-            val events = repository.streamModelResponse(
-                threadId = 10L,
-                modelId = "anthropic/claude-3.5-sonnet",
-                prompt = "Compare",
-                history = emptyList(),
-            ).toList()
-
-            val completion = events.last() as AssistantStreamEvent.Completed
-            assertEquals("Second attempt", completion.draft.content)
-            assertEquals(2, server.requestCount)
-            assertTrue(events.first() is AssistantStreamEvent.Streaming)
+            try {
+                repository.streamModelResponse(
+                    threadId = 10L,
+                    modelId = "anthropic/claude-3.5-sonnet",
+                    prompt = "Compare",
+                    history = emptyList(),
+                ).toList()
+                fail("Expected UiException")
+            } catch (exception: UiException) {
+                assertTrue(exception.error is UiError.Network)
+            }
+            assertEquals(1, server.requestCount)
         } finally {
             server.shutdown()
         }
@@ -272,7 +345,7 @@ class NetworkMappersTest {
     }
 
     @Test
-    fun `models repository fails over to second key on rate limit`() = runBlocking {
+    fun `models repository does not fail over to second key on rate limit`() = runBlocking {
         val service = FakeModelsOpenRouterService()
         val repository = OpenRouterModelsRepository(
             modelsDao = FakeModelsDao(),
@@ -280,11 +353,88 @@ class NetworkMappersTest {
             settingsRepository = FakeSettingsRepository(apiKeys = listOf("first-key", "second-key")),
         )
 
-        val models = repository.refreshModels()
+        try {
+            repository.refreshModels()
+            fail("Expected UiException")
+        } catch (exception: UiException) {
+            assertTrue(exception.error is UiError.Network)
+        }
 
-        assertEquals(1, models.size)
-        assertEquals("openrouter/auto", models.first().id)
-        assertEquals(listOf("Bearer first-key", "Bearer second-key"), service.authorizations)
+        assertEquals(listOf("Bearer first-key"), service.authorizations)
+    }
+
+    @Test
+    fun `models repository reuses fresh cache without repeated network call`() = runBlocking {
+        val service = SuccessfulModelsOpenRouterService()
+        val repository = OpenRouterModelsRepository(
+            modelsDao = FakeModelsDao(),
+            service = service,
+            settingsRepository = FakeSettingsRepository(apiKeys = listOf("good-key")),
+        )
+
+        val first = repository.refreshModels()
+        val second = repository.refreshModels()
+
+        assertEquals(1, first.size)
+        assertEquals(1, second.size)
+        assertEquals(listOf("Bearer good-key"), service.authorizations)
+    }
+
+    @Test
+    fun `models repository force refresh bypasses fresh cache`() = runBlocking {
+        val service = SuccessfulModelsOpenRouterService()
+        val repository = OpenRouterModelsRepository(
+            modelsDao = FakeModelsDao(),
+            service = service,
+            settingsRepository = FakeSettingsRepository(apiKeys = listOf("good-key")),
+        )
+
+        repository.refreshModels()
+        repository.refreshModels(forceRefresh = true)
+
+        assertEquals(listOf("Bearer good-key", "Bearer good-key"), service.authorizations)
+    }
+
+    @Test
+    fun `diagnostics repository maps current key info`() = runBlocking {
+        val service = SuccessfulModelsOpenRouterService()
+        val repository = DefaultOpenRouterDiagnosticsRepository(
+            service = service,
+            settingsRepository = FakeSettingsRepository(apiKeys = listOf("good-key")),
+        )
+
+        val diagnostics = repository.getCurrentKeyDiagnostics()
+
+        assertEquals(
+            OpenRouterKeyDiagnostics(
+                label = "Primary key",
+                isFreeTier = true,
+                limitRemaining = 17.0,
+                usageDaily = 9.0,
+                limitReset = "daily",
+            ),
+            diagnostics,
+        )
+    }
+
+    @Test
+    fun `models repository shares in flight refresh across concurrent calls`() = runBlocking {
+        val service = SuccessfulModelsOpenRouterService(delayMs = 100)
+        val repository = OpenRouterModelsRepository(
+            modelsDao = FakeModelsDao(),
+            service = service,
+            settingsRepository = FakeSettingsRepository(apiKeys = listOf("good-key")),
+        )
+
+        coroutineScope {
+            val first = async { repository.refreshModels() }
+            val second = async { repository.refreshModels() }
+
+            assertEquals(1, first.await().size)
+            assertEquals(1, second.await().size)
+        }
+
+        assertEquals(listOf("Bearer good-key"), service.authorizations)
     }
 
     @Test
@@ -392,10 +542,49 @@ private class FakeModelsDao : ModelsDao {
 private class FakeModelsOpenRouterService : OpenRouterService {
     val authorizations = mutableListOf<String>()
 
+    override suspend fun getCurrentKeyInfo(authorization: String): OpenRouterKeyInfoResponse {
+        throw UnsupportedOperationException()
+    }
+
     override suspend fun getModels(authorization: String): OpenRouterModelsResponse {
         authorizations += authorization
         if (authorization == "Bearer first-key") {
             throw UiException(UiError.Network("Сервис OpenRouter временно недоступен (429)"))
+        }
+        return OpenRouterModelsResponse(
+            data = listOf(OpenRouterModelDto(id = "openrouter/auto", name = "Auto")),
+        )
+    }
+
+    override suspend fun createChatCompletion(
+        authorization: String,
+        request: com.ivnsrg.aicontrolcentre.data.network.dto.OpenRouterChatRequest,
+    ): OpenRouterChatResponse {
+        throw UnsupportedOperationException()
+    }
+}
+
+private class SuccessfulModelsOpenRouterService(
+    private val delayMs: Long = 0,
+) : OpenRouterService {
+    val authorizations = mutableListOf<String>()
+
+    override suspend fun getCurrentKeyInfo(authorization: String): OpenRouterKeyInfoResponse {
+        return OpenRouterKeyInfoResponse(
+            data = OpenRouterKeyInfoDto(
+                label = "Primary key",
+                isFreeTier = true,
+                limitRemaining = 17.0,
+                usageDaily = 9.0,
+                limitReset = "daily",
+            ),
+        )
+    }
+
+    override suspend fun getModels(authorization: String): OpenRouterModelsResponse {
+        authorizations += authorization
+        if (delayMs > 0) {
+            delay(delayMs)
         }
         return OpenRouterModelsResponse(
             data = listOf(OpenRouterModelDto(id = "openrouter/auto", name = "Auto")),

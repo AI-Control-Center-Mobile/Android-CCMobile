@@ -130,7 +130,7 @@ private class StaticCompareModelsRepository : ModelsRepository {
 
     override suspend fun getCachedModels(): List<ModelCatalogEntry> = models
 
-    override suspend fun refreshModels(): List<ModelCatalogEntry> = models
+    override suspend fun refreshModels(forceRefresh: Boolean): List<ModelCatalogEntry> = models
 }
 
 private class PresentCompareKeySettingsRepository : SettingsRepository {

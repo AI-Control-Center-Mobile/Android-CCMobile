@@ -18,6 +18,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
@@ -101,6 +102,27 @@ fun AssistantMarkdownContent(
             }
         }
     }
+}
+
+@Composable
+fun AssistantMarkdownPreview(
+    content: String,
+    modifier: Modifier = Modifier,
+    maxLines: Int = 4,
+) {
+    val previewText = remember(content) {
+        buildInlineMarkdown(flattenMarkdownBlocksForPreview(parseMarkdownBlocks(content)))
+    }
+    val colors = MaterialTheme.appColors
+
+    Text(
+        text = previewText,
+        modifier = modifier.fillMaxWidth(),
+        style = MaterialTheme.typography.bodySmall,
+        color = colors.textSecondary,
+        maxLines = maxLines,
+        overflow = TextOverflow.Ellipsis,
+    )
 }
 
 fun parseMarkdownBlocks(raw: String): List<MessageMarkdownBlock> {
@@ -240,6 +262,28 @@ fun buildInlineMarkdown(text: String): AnnotatedString = buildAnnotatedString {
         }
     }
 }
+
+private fun flattenMarkdownBlocksForPreview(blocks: List<MessageMarkdownBlock>): String =
+    blocks.mapNotNull { block ->
+        when (block) {
+            is MessageMarkdownBlock.Heading -> block.text.takeIf { it.isNotBlank() }
+            is MessageMarkdownBlock.Paragraph -> block.text.takeIf { it.isNotBlank() }
+            is MessageMarkdownBlock.CodeBlock -> block.code.trim().takeIf { it.isNotBlank() }
+            MessageMarkdownBlock.Divider -> null
+            is MessageMarkdownBlock.Table -> buildString {
+                if (block.header.isNotEmpty()) {
+                    append(block.header.joinToString(" | ").trim())
+                }
+                block.rows.forEach { row ->
+                    val rowText = row.joinToString(" | ").trim()
+                    if (rowText.isNotBlank()) {
+                        if (isNotEmpty()) append('\n')
+                        append(rowText)
+                    }
+                }
+            }.takeIf { it.isNotBlank() }
+        }
+    }.joinToString("\n")
 
 fun formatLatencySeconds(latencyMs: Long): String {
     val seconds = latencyMs / 1000.0

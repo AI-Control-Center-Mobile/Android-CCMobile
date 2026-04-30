@@ -1,12 +1,15 @@
 package com.ivnsrg.aicontrolcentre.feature.setup
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -15,17 +18,16 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ivnsrg.aicontrolcentre.core.model.SettingsRepository
-import com.ivnsrg.aicontrolcentre.core.ui.components.AppInfoCallout
+import com.ivnsrg.aicontrolcentre.core.ui.components.AppCard
 import com.ivnsrg.aicontrolcentre.core.ui.components.AppScreenScaffold
 import com.ivnsrg.aicontrolcentre.core.ui.components.AppTextField
 import com.ivnsrg.aicontrolcentre.core.ui.components.BadgeTone
-import com.ivnsrg.aicontrolcentre.core.ui.components.CardTone
 import com.ivnsrg.aicontrolcentre.core.ui.components.HeaderDensity
 import com.ivnsrg.aicontrolcentre.core.ui.components.MetadataChip
-import com.ivnsrg.aicontrolcentre.core.ui.components.OperationalCard
 import com.ivnsrg.aicontrolcentre.core.ui.components.PrimaryButton
 import com.ivnsrg.aicontrolcentre.core.ui.components.SecondaryButton
 import com.ivnsrg.aicontrolcentre.core.ui.components.SectionLabel
+import com.ivnsrg.aicontrolcentre.core.ui.theme.LocalSpacing
 import com.ivnsrg.aicontrolcentre.core.ui.theme.appColors
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -129,24 +131,26 @@ fun SetupScreen(
     onContinueClick: () -> Unit,
 ) {
     val colors = MaterialTheme.appColors
+    val spacing = LocalSpacing.current
     AppScreenScaffold(
         title = "Initialize",
         subtitle = "Connect your OpenRouter workspace key.",
         headerDensity = HeaderDensity.Compact,
     ) { padding ->
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .padding(horizontal = 20.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(18.dp),
+                .padding(horizontal = 20.dp),
+            contentAlignment = Alignment.Center,
         ) {
-            OperationalCard(
-                tone = CardTone.Surface2,
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(spacing.md),
             ) {
-                Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                    SectionLabel("API Provider")
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                AppCard {
+                    Column(verticalArrangement = Arrangement.spacedBy(spacing.sm)) {
+                        SectionLabel("API Provider")
                         Text(
                             text = "OpenRouter.ai",
                             style = MaterialTheme.typography.titleLarge,
@@ -158,57 +162,61 @@ fun SetupScreen(
                             style = MaterialTheme.typography.bodySmall,
                             color = colors.textSecondary,
                         )
-                    }
-                    AppTextField(
-                        value = uiState.apiKey,
-                        onValueChange = onApiKeyChange,
-                        label = "OpenRouter API key",
-                        enabled = !uiState.isSaving,
-                    )
-                    uiState.error?.let { message ->
-                        MetadataChip(
-                            text = message,
-                            tone = BadgeTone.Danger,
+                        AppTextField(
+                            value = uiState.apiKey,
+                            onValueChange = onApiKeyChange,
+                            label = "OpenRouter API key",
+                            placeholder = "sk-or-v1-...",
+                            enabled = !uiState.isSaving,
+                            isSecret = true,
                         )
-                    }
-                    uiState.saveMessage?.let { message ->
-                        MetadataChip(
-                            text = message,
-                            tone = when (uiState.saveStatus) {
-                                SetupSaveStatus.Saved -> BadgeTone.Primary
-                                SetupSaveStatus.Failed -> BadgeTone.Danger
-                                SetupSaveStatus.Saving -> BadgeTone.Info
-                                SetupSaveStatus.Idle -> BadgeTone.Neutral
-                            },
-                        )
+                        uiState.error?.let { message ->
+                            MetadataChip(
+                                text = message,
+                                tone = BadgeTone.Danger,
+                            )
+                        }
+                        uiState.saveMessage?.let { message ->
+                            MetadataChip(
+                                text = message,
+                                tone = when (uiState.saveStatus) {
+                                    SetupSaveStatus.Saved -> BadgeTone.Primary
+                                    SetupSaveStatus.Failed -> BadgeTone.Danger
+                                    SetupSaveStatus.Saving -> BadgeTone.Info
+                                    SetupSaveStatus.Idle -> BadgeTone.Neutral
+                                },
+                            )
+                        }
                     }
                 }
-            }
 
-            AppInfoCallout(
-                title = "Local security",
-                body = "Your API key is encrypted and stored locally on device. The app does not relay keys through its own backend.",
-            )
+                AppCard {
+                    MetadataChip(text = "LOCAL SECURITY")
+                    Text(
+                        text = "Your API key is encrypted and stored locally on device. The app does not relay keys through its own backend.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = colors.textSecondary,
+                    )
+                }
 
-            OperationalCard(
-                tone = CardTone.Surface1,
-            ) {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                AppCard {
                     Text(
                         text = "This app works as a local-first AI control workspace. Configure the key once, then move into projects, threads and compare flows.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = colors.textSecondary,
                     )
-                    PrimaryButton(
-                        text = if (uiState.isSaving) "Saving…" else "Save key",
-                        onClick = onSaveClick,
-                        enabled = !uiState.isSaving,
-                    )
-                    if (uiState.saveStatus == SetupSaveStatus.Saved) {
-                        SecondaryButton(
-                            text = "Continue to Projects",
-                            onClick = onContinueClick,
+                    Column(verticalArrangement = Arrangement.spacedBy(spacing.sm)) {
+                        PrimaryButton(
+                            text = if (uiState.isSaving) "Saving…" else "Save key",
+                            onClick = onSaveClick,
+                            enabled = !uiState.isSaving,
                         )
+                        if (uiState.saveStatus == SetupSaveStatus.Saved) {
+                            SecondaryButton(
+                                text = "Continue to Projects",
+                                onClick = onContinueClick,
+                            )
+                        }
                     }
                 }
             }

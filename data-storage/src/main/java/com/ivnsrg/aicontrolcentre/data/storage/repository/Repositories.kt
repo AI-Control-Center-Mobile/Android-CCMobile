@@ -57,7 +57,7 @@ class DefaultThreadsRepository(
         val threadId = threadsDao.insert(
             ThreadEntity(
                 projectId = projectId,
-                title = title?.takeIf(String::isNotBlank) ?: "New Thread",
+                title = title?.takeIf { it.isNotBlank() } ?: "New Thread",
                 createdAt = now,
                 updatedAt = now,
             ),
@@ -122,6 +122,7 @@ class DefaultSettingsRepository(
     private val database: AppDatabase,
     private val secureApiKeyStorage: SecureApiKeyStorage,
     private val appPreferencesStore: AppPreferencesStore,
+    private val demoWorkspaceSeeder: DemoWorkspaceSeeder = DemoWorkspaceSeeder(database),
 ) : SettingsRepository {
     override suspend fun getApiKeys(): List<String> = secureApiKeyStorage.getApiKeys()
 
@@ -129,16 +130,24 @@ class DefaultSettingsRepository(
 
     override suspend fun addApiKey(key: String) {
         secureApiKeyStorage.addApiKey(key)
+        demoWorkspaceSeeder.seedIfEmpty()
     }
 
     override suspend fun removeApiKey(key: String) {
         secureApiKeyStorage.removeApiKey(key)
     }
 
-    override suspend fun getApiKey(): String? = secureApiKeyStorage.getApiKey()
+    override suspend fun getApiKey(): String? {
+        val apiKey = secureApiKeyStorage.getApiKey()
+        if (!apiKey.isNullOrBlank()) {
+            demoWorkspaceSeeder.seedIfEmpty()
+        }
+        return apiKey
+    }
 
     override suspend fun saveApiKey(key: String) {
-        secureApiKeyStorage.addApiKey(key)
+        secureApiKeyStorage.saveApiKey(key)
+        demoWorkspaceSeeder.seedIfEmpty()
     }
 
     override suspend fun clearApiKey() {

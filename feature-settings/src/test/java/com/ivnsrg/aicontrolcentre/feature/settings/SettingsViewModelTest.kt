@@ -1,5 +1,7 @@
 package com.ivnsrg.aicontrolcentre.feature.settings
 
+import com.ivnsrg.aicontrolcentre.core.model.OpenRouterDiagnosticsRepository
+import com.ivnsrg.aicontrolcentre.core.model.OpenRouterKeyDiagnostics
 import com.ivnsrg.aicontrolcentre.core.model.SettingsRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -21,7 +23,7 @@ class SettingsViewModelTest {
         Dispatchers.setMain(coroutineContext[ContinuationInterceptor] as CoroutineDispatcher)
         try {
             val repository = FakeSettingsRepository()
-            val viewModel = SettingsViewModel(repository)
+            val viewModel = SettingsViewModel(repository, FakeOpenRouterDiagnosticsRepository())
 
             viewModel.updateKeyDraft("sk-or-v1-test")
             viewModel.addKey()
@@ -32,10 +34,21 @@ class SettingsViewModelTest {
             assertEquals("", state.keyDraft)
             assertEquals(SettingsSaveStatus.Saved, state.saveStatus)
             assertTrue(state.saveMessage?.contains("Ключ сохранён") == true)
+            assertEquals(42.0, state.diagnostics?.limitRemaining ?: 0.0, 0.0)
         } finally {
             Dispatchers.resetMain()
         }
     }
+}
+
+private class FakeOpenRouterDiagnosticsRepository : OpenRouterDiagnosticsRepository {
+    override suspend fun getCurrentKeyDiagnostics(): OpenRouterKeyDiagnostics = OpenRouterKeyDiagnostics(
+        label = "Primary",
+        isFreeTier = true,
+        limitRemaining = 42.0,
+        usageDaily = 8.0,
+        limitReset = "daily",
+    )
 }
 
 private class FakeSettingsRepository : SettingsRepository {

@@ -1,6 +1,7 @@
 package com.ivnsrg.aicontrolcentre.feature.chat
 
 import com.ivnsrg.aicontrolcentre.core.model.AssistantMessageDraft
+import com.ivnsrg.aicontrolcentre.core.model.AssistantStreamEvent
 import com.ivnsrg.aicontrolcentre.core.model.ChatRepository
 import com.ivnsrg.aicontrolcentre.core.model.Message
 import com.ivnsrg.aicontrolcentre.core.model.MessageRole
@@ -17,11 +18,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 import kotlin.coroutines.ContinuationInterceptor
 
@@ -29,7 +32,7 @@ import kotlin.coroutines.ContinuationInterceptor
 class ThreadViewModelTest {
 
     @Test
-    fun `successful send persists one user and one assistant message`() = runTest {
+    fun `successful streaming send persists user immediately and assistant on completion`() = runTest {
         Dispatchers.setMain(coroutineContext[ContinuationInterceptor] as CoroutineDispatcher)
         try {
             val threadsRepository = RecordingThreadsRepository()
@@ -55,7 +58,7 @@ class ThreadViewModelTest {
     }
 
     @Test
-    fun `failed send does not persist orphan user message`() = runTest {
+    fun `failed streaming keeps persisted user and no assistant`() = runTest {
         Dispatchers.setMain(coroutineContext[ContinuationInterceptor] as CoroutineDispatcher)
         try {
             val threadsRepository = RecordingThreadsRepository()
@@ -72,7 +75,35 @@ class ThreadViewModelTest {
             viewModel.sendMessage()
             advanceUntilIdle()
 
-            assertEquals(emptyList<Message>(), threadsRepository.messages.value)
+            assertEquals(listOf(MessageRole.USER), threadsRepository.messages.value.map { it.role })
+            assertEquals("Hello", threadsRepository.messages.value.single().content)
+            assertNull(viewModel.uiState.value.streamingAssistant)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun `streaming state is cleared after completed response`() = runTest {
+        Dispatchers.setMain(coroutineContext[ContinuationInterceptor] as CoroutineDispatcher)
+        try {
+            val threadsRepository = RecordingThreadsRepository()
+            val viewModel = ThreadViewModel(
+                threadId = 1L,
+                threadsRepository = threadsRepository,
+                modelsRepository = StaticModelsRepository(),
+                settingsRepository = PresentKeySettingsRepository(),
+                chatRepository = SucceedingChatRepository(),
+            )
+
+            advanceUntilIdle()
+            viewModel.updatePrompt("Hello")
+            viewModel.sendMessage()
+            advanceUntilIdle()
+
+            assertEquals(false, viewModel.uiState.value.isStreamingResponse)
+            assertNull(viewModel.uiState.value.streamingAssistant)
+            assertEquals("", viewModel.uiState.value.promptDraft)
         } finally {
             Dispatchers.resetMain()
         }
@@ -92,6 +123,26 @@ private class SucceedingChatRepository : ChatRepository {
         latencyMs = 100L,
         estimatedCost = 0.001,
     )
+
+    override fun streamMessage(
+        threadId: Long,
+        modelId: String,
+        prompt: String,
+        history: List<Message>,
+    ): Flow<AssistantStreamEvent> = flow {
+        emit(AssistantStreamEvent.Streaming(accumulatedContent = "Ans", isProcessing = false))
+        emit(
+            AssistantStreamEvent.Completed(
+                AssistantMessageDraft(
+                    content = "Answer",
+                    provider = ModelProvider.OPEN_ROUTER,
+                    model = modelId,
+                    latencyMs = 100L,
+                    estimatedCost = 0.001,
+                ),
+            ),
+        )
+    }
 }
 
 private class FailingChatRepository : ChatRepository {
@@ -101,6 +152,16 @@ private class FailingChatRepository : ChatRepository {
         prompt: String,
         history: List<Message>,
     ): AssistantMessageDraft {
+        throw UiException(UiError.Network("offline"))
+    }
+
+    override fun streamMessage(
+        threadId: Long,
+        modelId: String,
+        prompt: String,
+        history: List<Message>,
+    ): Flow<AssistantStreamEvent> = flow {
+        emit(AssistantStreamEvent.Streaming(accumulatedContent = "Ans", isProcessing = false))
         throw UiException(UiError.Network("offline"))
     }
 }
@@ -119,7 +180,7 @@ private class StaticModelsRepository : ModelsRepository {
 
     override suspend fun getCachedModels(): List<ModelCatalogEntry> = models
 
-    override suspend fun refreshModels(): List<ModelCatalogEntry> = models
+    override suspend fun refreshModels(forceRefresh: Boolean): List<ModelCatalogEntry> = models
 }
 
 private class PresentKeySettingsRepository : SettingsRepository {

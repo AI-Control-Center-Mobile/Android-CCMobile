@@ -9,6 +9,21 @@ data class OpenRouterModelsResponse(
 )
 
 @Serializable
+data class OpenRouterKeyInfoResponse(
+    val data: OpenRouterKeyInfoDto? = null,
+)
+
+@Serializable
+data class OpenRouterKeyInfoDto(
+    val label: String? = null,
+    val limit: Double? = null,
+    @SerialName("limit_remaining") val limitRemaining: Double? = null,
+    @SerialName("limit_reset") val limitReset: String? = null,
+    @SerialName("usage_daily") val usageDaily: Double? = null,
+    @SerialName("is_free_tier") val isFreeTier: Boolean = true,
+)
+
+@Serializable
 data class OpenRouterModelDto(
     val id: String,
     val name: String? = null,

@@ -23,8 +23,12 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.ivnsrg.aicontrolcentre.core.model.OpenRouterDiagnosticsRepository
+import com.ivnsrg.aicontrolcentre.core.model.OpenRouterKeyDiagnostics
 import com.ivnsrg.aicontrolcentre.core.model.SettingsRepository
-import com.ivnsrg.aicontrolcentre.core.ui.components.AppInfoCallout
+import com.ivnsrg.aicontrolcentre.core.model.toReadableMessage
+import com.ivnsrg.aicontrolcentre.core.model.toUiError
+import com.ivnsrg.aicontrolcentre.core.ui.components.AppCard
 import com.ivnsrg.aicontrolcentre.core.ui.components.AppScreenScaffold
 import com.ivnsrg.aicontrolcentre.core.ui.components.AppTextField
 import com.ivnsrg.aicontrolcentre.core.ui.components.BadgeTone
@@ -36,8 +40,10 @@ import com.ivnsrg.aicontrolcentre.core.ui.components.MetadataChip
 import com.ivnsrg.aicontrolcentre.core.ui.components.OperationalCard
 import com.ivnsrg.aicontrolcentre.core.ui.components.PrimaryButton
 import com.ivnsrg.aicontrolcentre.core.ui.components.SectionLabel
+import com.ivnsrg.aicontrolcentre.core.ui.components.SectionHeader
 import com.ivnsrg.aicontrolcentre.core.ui.components.SecondaryButton
 import com.ivnsrg.aicontrolcentre.core.ui.components.StatusBadge
+import com.ivnsrg.aicontrolcentre.core.ui.theme.LocalSpacing
 import com.ivnsrg.aicontrolcentre.core.ui.theme.appColors
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -50,6 +56,9 @@ data class SettingsUiState(
     val saveStatus: SettingsSaveStatus = SettingsSaveStatus.Idle,
     val saveMessage: String? = null,
     val isClearing: Boolean = false,
+    val diagnostics: OpenRouterKeyDiagnostics? = null,
+    val isLoadingDiagnostics: Boolean = false,
+    val diagnosticsMessage: String? = null,
 ) {
     val hasApiKeys: Boolean
         get() = apiKeys.isNotEmpty()
@@ -64,6 +73,7 @@ enum class SettingsSaveStatus {
 
 class SettingsViewModel(
     private val settingsRepository: SettingsRepository,
+    private val diagnosticsRepository: OpenRouterDiagnosticsRepository,
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(SettingsUiState())
     val uiState: StateFlow<SettingsUiState> = _uiState.asStateFlow()
@@ -83,7 +93,13 @@ class SettingsViewModel(
     fun refresh() {
         viewModelScope.launch {
             val keys = settingsRepository.getApiKeys()
-            _uiState.value = _uiState.value.copy(apiKeys = keys)
+            _uiState.value = _uiState.value.copy(
+                apiKeys = keys,
+                diagnostics = if (keys.isEmpty()) null else _uiState.value.diagnostics,
+                diagnosticsMessage = if (keys.isEmpty()) null else _uiState.value.diagnosticsMessage,
+                isLoadingDiagnostics = keys.isNotEmpty(),
+            )
+            refreshDiagnostics(keys)
         }
     }
 
@@ -114,7 +130,12 @@ class SettingsViewModel(
                 } else {
                     "Не удалось подтвердить сохранение ключа"
                 },
+                isLoadingDiagnostics = wasPersisted,
+                diagnosticsMessage = if (wasPersisted) null else _uiState.value.diagnosticsMessage,
             )
+            if (wasPersisted) {
+                refreshDiagnostics(keys)
+            }
         }
     }
 
@@ -129,7 +150,11 @@ class SettingsViewModel(
                 apiKeys = keys,
                 saveStatus = SettingsSaveStatus.Idle,
                 saveMessage = null,
+                diagnostics = if (keys.isEmpty()) null else _uiState.value.diagnostics,
+                diagnosticsMessage = if (keys.isEmpty()) null else _uiState.value.diagnosticsMessage,
+                isLoadingDiagnostics = keys.isNotEmpty(),
             )
+            refreshDiagnostics(keys)
             if (keys.isEmpty()) {
                 onAllKeysRemoved()
             }
@@ -158,15 +183,56 @@ class SettingsViewModel(
             }
         }
     }
+
+    fun refreshDiagnostics() {
+        viewModelScope.launch {
+            val keys = settingsRepository.getApiKeys()
+            _uiState.value = _uiState.value.copy(
+                apiKeys = keys,
+                isLoadingDiagnostics = keys.isNotEmpty(),
+                diagnosticsMessage = null,
+                diagnostics = if (keys.isEmpty()) null else _uiState.value.diagnostics,
+            )
+            refreshDiagnostics(keys)
+        }
+    }
+
+    private suspend fun refreshDiagnostics(keys: List<String>) {
+        if (keys.isEmpty()) {
+            _uiState.value = _uiState.value.copy(
+                diagnostics = null,
+                diagnosticsMessage = null,
+                isLoadingDiagnostics = false,
+            )
+            return
+        }
+
+        runCatching {
+            diagnosticsRepository.getCurrentKeyDiagnostics()
+        }.onSuccess { diagnostics ->
+            _uiState.value = _uiState.value.copy(
+                diagnostics = diagnostics,
+                diagnosticsMessage = null,
+                isLoadingDiagnostics = false,
+            )
+        }.onFailure { throwable ->
+            _uiState.value = _uiState.value.copy(
+                diagnostics = null,
+                diagnosticsMessage = throwable.toUiError().toReadableMessage(),
+                isLoadingDiagnostics = false,
+            )
+        }
+    }
 }
 
 class SettingsViewModelFactory(
     private val settingsRepository: SettingsRepository,
+    private val diagnosticsRepository: OpenRouterDiagnosticsRepository,
 ) : ViewModelProvider.Factory {
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         if (modelClass.isAssignableFrom(SettingsViewModel::class.java)) {
             @Suppress("UNCHECKED_CAST")
-            return SettingsViewModel(settingsRepository) as T
+            return SettingsViewModel(settingsRepository, diagnosticsRepository) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
     }
@@ -175,9 +241,12 @@ class SettingsViewModelFactory(
 @Composable
 fun SettingsRoute(
     settingsRepository: SettingsRepository,
+    diagnosticsRepository: OpenRouterDiagnosticsRepository,
     onApiKeyRemoved: () -> Unit,
 ) {
-    val viewModel: SettingsViewModel = viewModel(factory = SettingsViewModelFactory(settingsRepository))
+    val viewModel: SettingsViewModel = viewModel(
+        factory = SettingsViewModelFactory(settingsRepository, diagnosticsRepository),
+    )
     val uiState by viewModel.uiState.collectAsState()
     var pendingRemoveKey by remember { mutableStateOf<String?>(null) }
     var showClearKeysDialog by remember { mutableStateOf(false) }
@@ -229,6 +298,7 @@ fun SettingsRoute(
         onRemoveKey = { pendingRemoveKey = it },
         onClearKeys = { showClearKeysDialog = true },
         onClearAll = { showClearAllDialog = true },
+        onRefreshDiagnostics = viewModel::refreshDiagnostics,
     )
 }
 
@@ -240,8 +310,10 @@ fun SettingsScreen(
     onRemoveKey: (String) -> Unit,
     onClearKeys: () -> Unit,
     onClearAll: () -> Unit,
+    onRefreshDiagnostics: () -> Unit,
 ) {
     val colors = MaterialTheme.appColors
+    val spacing = LocalSpacing.current
     AppScreenScaffold(
         title = "Settings",
         subtitle = "Infrastructure and device-local controls",
@@ -252,15 +324,15 @@ fun SettingsScreen(
                 .fillMaxSize()
                 .padding(padding)
                 .padding(horizontal = 20.dp),
-            verticalArrangement = Arrangement.spacedBy(18.dp),
-            contentPadding = PaddingValues(bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(spacing.md),
+            contentPadding = PaddingValues(bottom = spacing.xxl),
         ) {
             item {
-                SectionLabel("Infrastructure")
+                SectionHeader("INFRASTRUCTURE")
             }
             item {
-                OperationalCard {
-                    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                AppCard {
+                    Column(verticalArrangement = Arrangement.spacedBy(spacing.sm)) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -276,8 +348,8 @@ fun SettingsScreen(
                                     fontWeight = FontWeight.SemiBold,
                                 )
                                 Text(
-                                    text = "Secure local credential storage with automatic key failover",
-                                    style = MaterialTheme.typography.bodySmall,
+                                    text = "Secure local credential storage with automatic key failover.",
+                                    style = MaterialTheme.typography.bodyMedium,
                                     color = colors.textSecondary,
                                 )
                             }
@@ -292,6 +364,8 @@ fun SettingsScreen(
                             value = uiState.keyDraft,
                             onValueChange = onDraftChange,
                             label = "Add OpenRouter API key",
+                            placeholder = "sk-or-v1-...",
+                            isSecret = true,
                         )
                         uiState.saveMessage?.let { message ->
                             MetadataChip(
@@ -322,10 +396,8 @@ fun SettingsScreen(
             }
 
             item {
-                OperationalCard(
-                    tone = CardTone.Surface2,
-                ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                AppCard {
+                    Column(verticalArrangement = Arrangement.spacedBy(spacing.sm)) {
                         SectionLabel("Saved keys", tone = BadgeTone.Info)
                         if (uiState.apiKeys.isEmpty()) {
                             Text(
@@ -349,50 +421,116 @@ fun SettingsScreen(
             }
 
             item {
-                SectionLabel("App architecture")
-            }
-            item {
-                AppInfoCallout(
-                    title = "Local-first protocol",
-                    body = "SQLite persistence, encrypted key storage and no cloud sync. The current app state stays entirely on device.",
-                )
-            }
-            item {
-                OperationalCard(
-                    tone = CardTone.Surface1,
-                ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        MetadataChip(text = "SQLite • No sync • Zero knowledge", tone = BadgeTone.Info)
+                AppCard {
+                    Column(verticalArrangement = Arrangement.spacedBy(spacing.sm)) {
+                        SectionLabel("Quota diagnostics", tone = BadgeTone.Info)
                         Text(
-                            text = "Model engine wired through OpenRouter repositories. Compare and thread flows reuse the same local-first project context.",
-                            style = MaterialTheme.typography.bodySmall,
+                            text = "Current OpenRouter key status and free-tier limits.",
+                            style = MaterialTheme.typography.bodyMedium,
                             color = colors.textSecondary,
                         )
+                        SecondaryButton(
+                            text = if (uiState.isLoadingDiagnostics) "Refreshing…" else "Refresh quota",
+                            onClick = onRefreshDiagnostics,
+                            enabled = uiState.apiKeys.isNotEmpty() && !uiState.isLoadingDiagnostics && !uiState.isClearing,
+                        )
+
+                        when {
+                            uiState.apiKeys.isEmpty() -> {
+                                Text(
+                                    text = "Add an API key to load quota diagnostics.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colors.textSecondary,
+                                )
+                            }
+
+                            uiState.isLoadingDiagnostics -> {
+                                MetadataChip(text = "Loading diagnostics", tone = BadgeTone.Info)
+                            }
+
+                            uiState.diagnostics != null -> {
+                                KeyDiagnosticsPanel(uiState.diagnostics)
+                            }
+
+                            uiState.diagnosticsMessage != null -> {
+                                MetadataChip(
+                                    text = uiState.diagnosticsMessage,
+                                    tone = BadgeTone.Warning,
+                                )
+                            }
+                        }
                     }
                 }
             }
 
             item {
-                SectionLabel("Danger zone", tone = BadgeTone.Danger)
+                SectionHeader("DANGER ZONE")
             }
             item {
-                OperationalCard(
-                    tone = CardTone.Danger,
-                ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                AppCard {
+                    MetadataChip(text = "DESTRUCTIVE", tone = BadgeTone.Danger)
+                    Column(verticalArrangement = Arrangement.spacedBy(spacing.sm)) {
                         Text(
-                        text = "Permanently remove all local projects, threads, messages and credentials from this device.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = colors.textSecondary,
-                    )
-                    SecondaryButton(
-                        text = if (uiState.isClearing) "Clearing…" else "Wipe all local data",
-                        onClick = onClearAll,
-                        enabled = !uiState.isClearing,
-                    )
+                            text = "Permanently remove all local projects, threads, messages and credentials from this device.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = colors.textSecondary,
+                        )
+                        SecondaryButton(
+                            text = if (uiState.isClearing) "Clearing…" else "Wipe all local data",
+                            onClick = onClearAll,
+                            enabled = !uiState.isClearing,
+                        )
+                    }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun KeyDiagnosticsPanel(
+    diagnostics: OpenRouterKeyDiagnostics,
+) {
+    val colors = MaterialTheme.appColors
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            MetadataChip(
+                text = if (diagnostics.isFreeTier) "FREE TIER" else "PAID",
+                tone = if (diagnostics.isFreeTier) BadgeTone.Warning else BadgeTone.Primary,
+            )
+            diagnostics.limitRemaining?.let {
+                MetadataChip(
+                    text = "remaining ${formatQuotaValue(it)}",
+                    tone = BadgeTone.Info,
+                )
+            }
+        }
+        diagnostics.label?.let { label ->
+            Text(
+                text = "Key: $label",
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.textPrimary,
+            )
+        }
+        Text(
+            text = buildString {
+                append("Daily usage: ${formatQuotaValue(diagnostics.usageDaily)}")
+                diagnostics.limitReset?.takeIf { it.isNotBlank() }?.let { reset ->
+                    append(" • Reset: $reset")
+                }
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = colors.textSecondary,
+        )
+        if (diagnostics.isFreeTier) {
+            Text(
+                text = "Free variants on OpenRouter have stricter limits, including 20 requests per minute and a lower daily cap unless the account has enough purchased credits. One visible send can still coincide with model sync requests if the catalog needs refresh.",
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.textSecondary,
+            )
         }
     }
 }
@@ -439,3 +577,10 @@ internal fun maskApiKey(value: String): String {
     if (trimmed.length <= 10) return trimmed
     return "${trimmed.take(8)}…${trimmed.takeLast(4)}"
 }
+
+private fun formatQuotaValue(value: Double): String =
+    if (value % 1.0 == 0.0) {
+        value.toInt().toString()
+    } else {
+        String.format("%.2f", value)
+    }

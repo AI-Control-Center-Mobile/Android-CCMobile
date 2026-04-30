@@ -1,18 +1,36 @@
 package com.ivnsrg.aicontrolcentre.feature.chat
 
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -26,6 +44,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -34,6 +54,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.ivnsrg.aicontrolcentre.core.model.AssistantStreamEvent
 import com.ivnsrg.aicontrolcentre.core.model.ChatRepository
 import com.ivnsrg.aicontrolcentre.core.model.Message
 import com.ivnsrg.aicontrolcentre.core.model.MessageRole
@@ -58,6 +79,7 @@ import com.ivnsrg.aicontrolcentre.core.ui.components.OperationalCard
 import com.ivnsrg.aicontrolcentre.core.ui.components.PrimaryButton
 import com.ivnsrg.aicontrolcentre.core.ui.components.SectionLabel
 import com.ivnsrg.aicontrolcentre.core.ui.theme.appColors
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -65,13 +87,25 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
+enum class ChatStreamingStatus {
+    Waiting,
+    Streaming,
+}
+
+data class StreamingAssistantUiState(
+    val modelId: String,
+    val content: String = "",
+    val status: ChatStreamingStatus = ChatStreamingStatus.Waiting,
+)
+
 data class ThreadUiState(
     val messages: List<Message> = emptyList(),
     val models: List<ModelCatalogEntry> = emptyList(),
     val selectedModelId: String? = null,
     val promptDraft: String = "",
     val isLoadingModels: Boolean = true,
-    val isSending: Boolean = false,
+    val isStreamingResponse: Boolean = false,
+    val streamingAssistant: StreamingAssistantUiState? = null,
     val error: UiError = UiError.None,
 )
 
@@ -121,7 +155,7 @@ class ThreadViewModel(
         }
     }
 
-    fun refreshModels() {
+    fun refreshModels(forceRefresh: Boolean = false) {
         viewModelScope.launch {
             _uiState.update { it.copy(isLoadingModels = true, error = UiError.None) }
 
@@ -131,7 +165,7 @@ class ThreadViewModel(
             }
 
             try {
-                val remoteModels = modelsRepository.refreshModels()
+                val remoteModels = modelsRepository.refreshModels(forceRefresh = forceRefresh)
                     .filter { it.supportsChat }
                 val models = if (remoteModels.isNotEmpty()) remoteModels else modelsRepository.getCachedModels().filter { it.supportsChat }
 
@@ -183,6 +217,8 @@ class ThreadViewModel(
 
     fun sendMessage() {
         val state = _uiState.value
+        if (state.isStreamingResponse) return
+
         val prompt = state.promptDraft.trim()
         if (prompt.isBlank()) {
             _uiState.update { it.copy(error = UiError.Validation("Введите сообщение")) }
@@ -196,16 +232,50 @@ class ThreadViewModel(
         }
 
         viewModelScope.launch {
-            _uiState.update { it.copy(isSending = true, error = UiError.None) }
+            _uiState.update {
+                it.copy(
+                    isStreamingResponse = true,
+                    streamingAssistant = StreamingAssistantUiState(modelId = selectedModelId),
+                    error = UiError.None,
+                )
+            }
 
             try {
-                val assistantDraft = chatRepository.sendMessage(
+                threadsRepository.insertUserMessage(threadId, prompt, selectedModelId)
+                var completedDraft: com.ivnsrg.aicontrolcentre.core.model.AssistantMessageDraft? = null
+
+                chatRepository.streamMessage(
                     threadId = threadId,
                     modelId = selectedModelId,
                     prompt = prompt,
                     history = state.messages,
-                )
-                threadsRepository.insertUserMessage(threadId, prompt, selectedModelId)
+                ).collectLatest { event ->
+                    when (event) {
+                        is AssistantStreamEvent.Streaming -> {
+                            _uiState.update {
+                                it.copy(
+                                    streamingAssistant = StreamingAssistantUiState(
+                                        modelId = selectedModelId,
+                                        content = event.accumulatedContent,
+                                        status = if (event.accumulatedContent.isBlank()) {
+                                            ChatStreamingStatus.Waiting
+                                        } else {
+                                            ChatStreamingStatus.Streaming
+                                        },
+                                    ),
+                                )
+                            }
+                        }
+
+                        is AssistantStreamEvent.Completed -> {
+                            completedDraft = event.draft
+                        }
+                    }
+                }
+
+                val assistantDraft = completedDraft
+                    ?: throw UiException(UiError.Network("Генерация прервалась до завершения ответа"))
+
                 threadsRepository.insertAssistantMessage(
                     threadId = threadId,
                     content = assistantDraft.content,
@@ -217,11 +287,18 @@ class ThreadViewModel(
                 _uiState.update {
                     it.copy(
                         promptDraft = "",
-                        isSending = false,
+                        isStreamingResponse = false,
+                        streamingAssistant = null,
                     )
                 }
             } catch (throwable: Throwable) {
-                _uiState.update { it.copy(isSending = false, error = throwable.toUiError()) }
+                _uiState.update {
+                    it.copy(
+                        isStreamingResponse = false,
+                        streamingAssistant = null,
+                        error = throwable.toUiError(),
+                    )
+                }
             }
         }
     }
@@ -294,7 +371,7 @@ fun ThreadRoute(
         uiState = uiState,
         onPromptChange = viewModel::updatePrompt,
         onSendClick = viewModel::sendMessage,
-        onRetryModels = viewModel::refreshModels,
+        onRetryModels = { viewModel.refreshModels(forceRefresh = true) },
         onCompareClick = { onCompareClick(uiState.selectedModelId) },
         onOpenModelPicker = { onModelPickerClick(uiState.selectedModelId) },
         onBack = onBack,
@@ -358,6 +435,14 @@ fun ThreadScreen(
                 }
             }
         },
+        bottomBar = {
+            ComposerCard(
+                promptDraft = uiState.promptDraft,
+                onPromptChange = onPromptChange,
+                onSendClick = onSendClick,
+                isStreamingResponse = uiState.isStreamingResponse,
+            )
+        },
     ) { padding ->
         Column(
             modifier = Modifier
@@ -370,6 +455,7 @@ fun ThreadScreen(
                 ThreadErrorCard(
                     error = uiState.error,
                     onRetry = onRetryModels,
+                    showRetry = uiState.models.isEmpty(),
                 )
             }
 
@@ -384,7 +470,7 @@ fun ThreadScreen(
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.Center,
                         ) {
-                            androidx.compose.material3.CircularProgressIndicator(color = colors.accentPrimary)
+                            CircularProgressIndicator(color = colors.accentPrimary)
                             Text(
                                 text = "Syncing model catalog…",
                                 modifier = Modifier.padding(top = 12.dp),
@@ -407,6 +493,7 @@ fun ThreadScreen(
                     LazyColumn(
                         modifier = Modifier.weight(1f),
                         verticalArrangement = Arrangement.spacedBy(14.dp),
+                        contentPadding = PaddingValues(bottom = 8.dp),
                     ) {
                         itemsIndexed(uiState.messages, key = { _, message -> message.id }) { index, message ->
                             val switchNotice = modelSwitchNotice(uiState.messages, index)
@@ -419,16 +506,14 @@ fun ThreadScreen(
                             }
                             MessageBubble(message = message)
                         }
+                        uiState.streamingAssistant?.let { assistant ->
+                            item(key = "streaming-assistant") {
+                                StreamingAssistantBubble(assistant = assistant)
+                            }
+                        }
                     }
                 }
             }
-
-            ComposerCard(
-                promptDraft = uiState.promptDraft,
-                onPromptChange = onPromptChange,
-                onSendClick = onSendClick,
-                isSending = uiState.isSending,
-            )
         }
     }
 }
@@ -554,53 +639,76 @@ private fun ComposerCard(
     promptDraft: String,
     onPromptChange: (String) -> Unit,
     onSendClick: () -> Unit,
-    isSending: Boolean,
+    isStreamingResponse: Boolean,
+    modifier: Modifier = Modifier,
 ) {
     val colors = MaterialTheme.appColors
-    OperationalCard(
-        tone = CardTone.Surface1,
-        padding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+    val dockShape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .shadow(
+                elevation = 14.dp,
+                shape = dockShape,
+                ambientColor = colors.background.copy(alpha = 0.38f),
+                spotColor = colors.background.copy(alpha = 0.18f),
+            )
+            .border(1.dp, colors.stroke.copy(alpha = 0.55f), dockShape)
+            .background(colors.surface2.copy(alpha = 0.92f), dockShape)
+            .windowInsetsPadding(
+                WindowInsets.navigationBars
+                    .union(WindowInsets.ime)
+                    .only(WindowInsetsSides.Bottom),
+            ),
     ) {
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            SectionLabel("Compose")
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                OutlinedTextField(
-                    value = promptDraft,
-                    onValueChange = onPromptChange,
-                    modifier = Modifier.weight(1f),
-                    placeholder = { Text("Message Claude…", color = colors.textMuted) },
-                    enabled = !isSending,
-                    maxLines = 3,
-                    singleLine = false,
-                    shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = colors.stroke,
-                        unfocusedBorderColor = colors.stroke,
-                        focusedContainerColor = colors.background,
-                        unfocusedContainerColor = colors.background,
-                        disabledContainerColor = colors.surface2,
-                        focusedTextColor = colors.textPrimary,
-                        unfocusedTextColor = colors.textPrimary,
-                        cursorColor = colors.accentPrimary,
-                    ),
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 16.dp),
+            verticalAlignment = Alignment.Bottom,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            OutlinedTextField(
+                value = promptDraft,
+                onValueChange = onPromptChange,
+                modifier = Modifier
+                    .weight(1f)
+                    .heightIn(min = 56.dp),
+                placeholder = { Text("Message Claude…", color = colors.textMuted) },
+                enabled = !isStreamingResponse,
+                maxLines = 3,
+                singleLine = false,
+                shape = RoundedCornerShape(18.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = colors.stroke.copy(alpha = 0.9f),
+                    unfocusedBorderColor = colors.stroke.copy(alpha = 0.75f),
+                    focusedContainerColor = colors.background.copy(alpha = 0.88f),
+                    unfocusedContainerColor = colors.background.copy(alpha = 0.88f),
+                    disabledContainerColor = colors.background.copy(alpha = 0.72f),
+                    focusedTextColor = colors.textPrimary,
+                    unfocusedTextColor = colors.textPrimary,
+                    cursorColor = colors.accentPrimary,
                 )
-                Box(
-                    modifier = Modifier
-                        .padding(bottom = 2.dp)
-                        .background(
-                            color = colors.accentPrimary,
-                            shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
-                        )
-                        .clickable(enabled = !isSending, onClick = onSendClick)
-                        .padding(horizontal = 18.dp, vertical = 18.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
+            )
+            Box(
+                modifier = Modifier
+                    .background(
+                        color = colors.accentPrimary,
+                        shape = RoundedCornerShape(18.dp),
+                    )
+                    .clickable(enabled = !isStreamingResponse, onClick = onSendClick)
+                    .padding(horizontal = if (isStreamingResponse) 14.dp else 18.dp, vertical = 16.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (isStreamingResponse) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(14.dp),
+                        color = colors.background,
+                        strokeWidth = 1.5.dp,
+                    )
+                } else {
                     Text(
-                        text = if (isSending) "…" else "Send",
+                        text = "Send",
                         style = MaterialTheme.typography.labelLarge,
                         color = colors.background,
                     )
@@ -614,6 +722,7 @@ private fun ComposerCard(
 private fun ThreadErrorCard(
     error: UiError,
     onRetry: () -> Unit,
+    showRetry: Boolean,
 ) {
     OperationalCard(
         tone = CardTone.Danger,
@@ -625,12 +734,104 @@ private fun ThreadErrorCard(
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.appColors.textSecondary,
             )
-            CompactActionButton(
-                text = "Retry sync",
-                onClick = onRetry,
-                tone = BadgeTone.Danger,
+            if (showRetry) {
+                CompactActionButton(
+                    text = "Retry sync",
+                    onClick = onRetry,
+                    tone = BadgeTone.Danger,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun StreamingAssistantBubble(
+    assistant: StreamingAssistantUiState,
+) {
+    val colors = MaterialTheme.appColors
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.Start,
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth(0.92f)
+                .background(
+                    colors.surface3,
+                    shape = RoundedCornerShape(
+                        topStart = 8.dp,
+                        topEnd = 20.dp,
+                        bottomStart = 20.dp,
+                        bottomEnd = 20.dp,
+                    ),
+                )
+                .padding(16.dp),
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    text = "Assistant",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = colors.textMuted,
+                )
+                if (assistant.content.isBlank()) {
+                    ChatStreamingPlaceholder(label = "OpenRouter processing")
+                } else {
+                    AssistantMarkdownContent(content = assistant.content)
+                }
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    MetadataChip(
+                        text = assistant.modelId.substringAfterLast('/'),
+                        tone = BadgeTone.Primary,
+                    )
+                    MetadataChip(
+                        text = if (assistant.status == ChatStreamingStatus.Waiting) "waiting" else "streaming",
+                        tone = if (assistant.status == ChatStreamingStatus.Waiting) BadgeTone.Info else BadgeTone.Warning,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChatStreamingPlaceholder(label: String) {
+    val colors = MaterialTheme.appColors
+    val pulse = rememberInfiniteTransition(label = "chat-stream-placeholder")
+    val alpha by pulse.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 0.95f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 800),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "chat-stream-placeholder-alpha",
+    )
+
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        repeat(3) { index ->
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(if (index == 2) 0.62f else 1f)
+                    .padding(end = if (index == 1) 24.dp else 0.dp)
+                    .alpha(alpha)
+                    .background(
+                        color = colors.surface2,
+                        shape = MaterialTheme.shapes.medium,
+                    )
+                    .padding(vertical = 7.dp),
             )
         }
+        Text(
+            text = "$label…",
+            style = MaterialTheme.typography.labelSmall,
+            color = colors.textSecondary,
+        )
     }
 }
 
