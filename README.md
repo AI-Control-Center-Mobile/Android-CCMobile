@@ -2,6 +2,10 @@
 
 Android client for a local-first AI control workspace built around OpenRouter. The app lets you save an API key on device, organize work into projects and threads, chat with selected models, compare two model responses side by side, and inspect OpenRouter key diagnostics without relying on an app backend.
 
+## Demo
+
+- [Screen recording demo](docs/Screen_recording_20260430_135651.mp4)
+
 ## What the app does
 
 - Stores OpenRouter API keys locally in encrypted Android storage
