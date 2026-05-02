@@ -1,23 +1,17 @@
 package com.ivnsrg.aicontrolcentre.data.storage.security
 
 import android.content.Context
+import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 
 class SecureApiKeyStorage(
-    context: Context,
+    private val prefs: SharedPreferences,
 ) {
-    private val masterKey = MasterKey.Builder(context)
-        .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-        .build()
+    constructor(context: Context) : this(createEncryptedPreferences(context))
 
-    private val prefs = EncryptedSharedPreferences.create(
-        context,
-        FILE_NAME,
-        masterKey,
-        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
-    )
+    @Suppress("UNUSED_PARAMETER")
+    internal constructor(prefs: SharedPreferences, testOnly: Boolean) : this(prefs)
 
     fun getApiKeys(): List<String> {
         migrateLegacyKeyIfNeeded()
@@ -36,11 +30,7 @@ class SecureApiKeyStorage(
         val normalized = key.trim()
         if (normalized.isBlank()) return
 
-        val updated = getApiKeys().toMutableList().apply {
-            remove(normalized)
-            add(0, normalized)
-        }
-        persistKeys(updated)
+        persistKeys(listOf(normalized) + getApiKeys().filterNot { it == normalized })
     }
 
     fun removeApiKey(key: String) {
@@ -49,9 +39,7 @@ class SecureApiKeyStorage(
         persistKeys(getApiKeys().filterNot { it == normalized })
     }
 
-    fun saveApiKey(key: String) {
-        addApiKey(key)
-    }
+    fun saveApiKey(key: String) = addApiKey(key)
 
     fun clearApiKey() {
         prefs.edit()
@@ -83,5 +71,19 @@ class SecureApiKeyStorage(
         private const val KEY_API = "openrouter_api_key"
         private const val KEY_API_LIST = "openrouter_api_keys"
         private const val KEY_DELIMITER = "\n"
+
+        private fun createEncryptedPreferences(context: Context): SharedPreferences {
+            val masterKey = MasterKey.Builder(context)
+                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                .build()
+
+            return EncryptedSharedPreferences.create(
+                context,
+                FILE_NAME,
+                masterKey,
+                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
+            )
+        }
     }
 }

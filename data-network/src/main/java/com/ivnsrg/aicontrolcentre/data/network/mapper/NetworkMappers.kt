@@ -50,36 +50,35 @@ fun OpenRouterChatResponse.toAssistantMessageDraft(
 fun OpenRouterChatResponse.toProviderMessage(): String =
     choices.firstOrNull()?.message?.content?.trim().orEmpty()
 
-fun mapNetworkFailure(throwable: Throwable): UiException {
-    if (throwable is UiException) return throwable
-
-    return when (throwable) {
-        is HttpException -> {
-            when (throwable.code()) {
-                401, 403 -> UiException(UiError.MissingApiKey, throwable)
-                408, 429, 500, 502, 503 -> UiException(
-                    UiError.Network("Сервис OpenRouter временно недоступен (${throwable.code()})"),
-                    throwable,
-                )
-                else -> UiException(
-                    UiError.Provider("Провайдер вернул ошибку ${throwable.code()}"),
-                    throwable,
-                )
-            }
+fun mapNetworkFailure(throwable: Throwable): UiException = when (throwable) {
+    is UiException -> throwable
+    is HttpException -> {
+        when (throwable.code()) {
+            401, 403 -> UiException(UiError.MissingApiKey, throwable)
+            408, 429, 500, 502, 503 -> UiException(
+                UiError.Network("Сервис OpenRouter временно недоступен (${throwable.code()})"),
+                throwable,
+            )
+            else -> UiException(
+                UiError.Provider("Провайдер вернул ошибку ${throwable.code()}"),
+                throwable,
+            )
         }
-
-        is IOException -> UiException(UiError.Network("Проверь подключение к сети и повтори попытку"), throwable)
-        else -> UiException(UiError.Unknown(throwable.message ?: "Неизвестная ошибка"), throwable)
     }
+
+    is IOException -> UiException(UiError.Network("Проверь подключение к сети и повтори попытку"), throwable)
+    else -> UiException(UiError.Unknown(throwable.message ?: "Неизвестная ошибка"), throwable)
 }
 
-fun com.ivnsrg.aicontrolcentre.data.network.dto.OpenRouterUsageDto?.toEstimatedCost(): Double? {
-    if (this == null) return null
-    return cost ?: totalCost ?: estimateCostFromTokens()
-}
+fun com.ivnsrg.aicontrolcentre.data.network.dto.OpenRouterUsageDto?.toEstimatedCost(): Double? =
+    this?.run { cost ?: totalCost ?: estimateCostFromTokens() }
 
 private fun com.ivnsrg.aicontrolcentre.data.network.dto.OpenRouterUsageDto.estimateCostFromTokens(): Double? {
-    val total = totalTokens ?: listOfNotNull(promptTokens, completionTokens).takeIf { it.isNotEmpty() }?.sum()
+    val total = totalTokens
+        ?: listOfNotNull(promptTokens, completionTokens)
+            .takeIf { it.isNotEmpty() }
+            ?.sum()
+
     return total?.takeIf { it > 0 }?.let { tokens -> tokens * TOKEN_COST_FALLBACK_USD }
 }
 

@@ -19,7 +19,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "AIControlCentreAnroid"
 rootProject.name = "AIControlCentreAndroid"
 
 include(
@@ -34,4 +33,3 @@ include(
     ":feature-compare",
     ":feature-settings"
 )
- 
