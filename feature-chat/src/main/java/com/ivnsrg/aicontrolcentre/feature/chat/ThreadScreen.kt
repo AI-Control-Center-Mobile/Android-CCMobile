@@ -59,6 +59,7 @@ import com.ivnsrg.aicontrolcentre.core.model.ChatRepository
 import com.ivnsrg.aicontrolcentre.core.model.Message
 import com.ivnsrg.aicontrolcentre.core.model.MessageRole
 import com.ivnsrg.aicontrolcentre.core.model.ModelCatalogEntry
+import com.ivnsrg.aicontrolcentre.core.model.ModelProvider
 import com.ivnsrg.aicontrolcentre.core.model.ModelsRepository
 import com.ivnsrg.aicontrolcentre.core.model.SettingsRepository
 import com.ivnsrg.aicontrolcentre.core.model.ThreadsRepository
@@ -94,6 +95,7 @@ enum class ChatStreamingStatus {
 
 data class StreamingAssistantUiState(
     val modelId: String,
+    val provider: ModelProvider,
     val content: String = "",
     val status: ChatStreamingStatus = ChatStreamingStatus.Waiting,
 )
@@ -159,7 +161,7 @@ class ThreadViewModel(
         viewModelScope.launch {
             _uiState.update { it.copy(isLoadingModels = true, error = UiError.None) }
 
-            if (settingsRepository.getApiKey().isNullOrBlank()) {
+            if (!settingsRepository.hasAnyApiKeys()) {
                 _uiState.update { it.copy(isLoadingModels = false, error = UiError.MissingApiKey) }
                 return@launch
             }
@@ -225,8 +227,10 @@ class ThreadViewModel(
             return
         }
 
-        val selectedModelId = state.selectedModelId
-        if (selectedModelId.isNullOrBlank()) {
+        val selectedModel = state.selectedModelId?.let { selectedId ->
+            state.models.firstOrNull { it.id == selectedId }
+        }
+        if (selectedModel == null) {
             _uiState.update { it.copy(error = UiError.Validation("Сначала выбери модель")) }
             return
         }
@@ -235,18 +239,27 @@ class ThreadViewModel(
             _uiState.update {
                 it.copy(
                     isStreamingResponse = true,
-                    streamingAssistant = StreamingAssistantUiState(modelId = selectedModelId),
+                    streamingAssistant = StreamingAssistantUiState(
+                        modelId = selectedModel.model,
+                        provider = selectedModel.provider,
+                    ),
                     error = UiError.None,
                 )
             }
 
             try {
-                threadsRepository.insertUserMessage(threadId, prompt, selectedModelId)
+                threadsRepository.insertUserMessage(
+                    threadId = threadId,
+                    content = prompt,
+                    targetModel = selectedModel.id,
+                    targetProvider = selectedModel.provider,
+                )
                 var completedDraft: com.ivnsrg.aicontrolcentre.core.model.AssistantMessageDraft? = null
 
                 chatRepository.streamMessage(
                     threadId = threadId,
-                    modelId = selectedModelId,
+                    provider = selectedModel.provider,
+                    modelId = selectedModel.model,
                     prompt = prompt,
                     history = state.messages,
                 ).collectLatest { event ->
@@ -255,7 +268,8 @@ class ThreadViewModel(
                             _uiState.update {
                                 it.copy(
                                     streamingAssistant = StreamingAssistantUiState(
-                                        modelId = selectedModelId,
+                                        modelId = selectedModel.model,
+                                        provider = selectedModel.provider,
                                         content = event.accumulatedContent,
                                         status = if (event.accumulatedContent.isBlank()) {
                                             ChatStreamingStatus.Waiting
@@ -390,6 +404,9 @@ fun ThreadScreen(
     onBack: () -> Unit,
 ) {
     val colors = MaterialTheme.appColors
+    val selectedModel = uiState.selectedModelId?.let { selectedId ->
+        uiState.models.firstOrNull { it.id == selectedId }
+    }
     AppScreenScaffold(
         title = "",
         topBar = {
@@ -424,9 +441,15 @@ fun ThreadScreen(
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         MetadataChip(
-                            text = uiState.selectedModelId?.substringAfterLast('/') ?: "no model",
+                            text = selectedModel?.provider?.displayName ?: "no model",
                             tone = BadgeTone.Primary,
                         )
+                        selectedModel?.let {
+                            MetadataChip(
+                                text = it.model.substringAfterLast('/'),
+                                tone = BadgeTone.Info,
+                            )
+                        }
                         MetadataChip(
                             text = if (uiState.isLoadingModels) "syncing" else "ready",
                             tone = if (uiState.isLoadingModels) BadgeTone.Warning else BadgeTone.Info,
@@ -591,7 +614,7 @@ private fun MessageBubble(message: Message) {
                                 .horizontalScroll(rememberScrollState()),
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            message.provider?.let { MetadataChip(text = it.name, tone = BadgeTone.Neutral) }
+                            message.provider?.let { MetadataChip(text = it.displayName, tone = BadgeTone.Neutral) }
                             message.model?.let { MetadataChip(text = it.substringAfterLast('/'), tone = BadgeTone.Primary) }
                         }
                         Row(
@@ -777,7 +800,7 @@ private fun StreamingAssistantBubble(
                     color = colors.textMuted,
                 )
                 if (assistant.content.isBlank()) {
-                    ChatStreamingPlaceholder(label = "OpenRouter processing")
+                    ChatStreamingPlaceholder(label = "Provider processing")
                 } else {
                     AssistantMarkdownContent(content = assistant.content)
                 }
@@ -785,6 +808,10 @@ private fun StreamingAssistantBubble(
                     modifier = Modifier.horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
+                    MetadataChip(
+                        text = assistant.provider.displayName,
+                        tone = BadgeTone.Primary,
+                    )
                     MetadataChip(
                         text = assistant.modelId.substringAfterLast('/'),
                         tone = BadgeTone.Primary,
@@ -845,8 +872,13 @@ private fun resolveSelectedModel(
 
     val recentMessageModel = messages
         .asReversed()
-        .mapNotNull { it.model }
-        .firstOrNull { candidate -> models.any { it.id == candidate } }
+        .mapNotNull { message ->
+            models.firstOrNull { model ->
+                model.id == message.model ||
+                    (message.provider == model.provider && message.model == model.model)
+            }?.id
+        }
+        .firstOrNull()
 
     return recentMessageModel ?: models.first().id
 }
@@ -860,8 +892,8 @@ private fun modelSwitchNotice(messages: List<Message>, index: Int): String? {
         .subList(0, index)
         .asReversed()
         .firstOrNull { it.role == MessageRole.ASSISTANT && it.model != null }
-        ?.model
-
-    if (previousAssistantModel == null || previousAssistantModel == currentModel) return null
-    return "Model switched to ${currentModel.substringAfterLast('/')}"
+    if (previousAssistantModel == null) return null
+    if (previousAssistantModel.provider == current.provider && previousAssistantModel.model == currentModel) return null
+    val providerLabel = current.provider?.displayName ?: "provider"
+    return "Model switched to $providerLabel • ${currentModel.substringAfterLast('/')}"
 }

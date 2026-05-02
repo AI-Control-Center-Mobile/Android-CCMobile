@@ -9,6 +9,7 @@ import com.ivnsrg.aicontrolcentre.core.model.MessageRole
 import com.ivnsrg.aicontrolcentre.core.model.ModelCatalogEntry
 import com.ivnsrg.aicontrolcentre.core.model.ModelProvider
 import com.ivnsrg.aicontrolcentre.core.model.ModelsRepository
+import com.ivnsrg.aicontrolcentre.core.model.ProviderApiKey
 import com.ivnsrg.aicontrolcentre.core.model.SettingsRepository
 import com.ivnsrg.aicontrolcentre.core.model.Thread
 import com.ivnsrg.aicontrolcentre.core.model.ThreadsRepository
@@ -95,7 +96,9 @@ class CompareViewModelTest {
 private class StreamingCompareRepository : CompareRepository {
     override suspend fun compare(
         threadId: Long,
+        providerA: ModelProvider,
         modelA: String,
+        providerB: ModelProvider,
         modelB: String,
         prompt: String,
         history: List<Message>,
@@ -106,6 +109,7 @@ private class StreamingCompareRepository : CompareRepository {
 
     override fun streamModelResponse(
         threadId: Long,
+        provider: ModelProvider,
         modelId: String,
         prompt: String,
         history: List<Message>,
@@ -134,13 +138,18 @@ private class StaticCompareModelsRepository : ModelsRepository {
 }
 
 private class PresentCompareKeySettingsRepository : SettingsRepository {
-    override suspend fun getApiKeys(): List<String> = listOf("key")
-    override suspend fun getPrimaryApiKey(): String = "key"
-    override suspend fun addApiKey(key: String) = Unit
-    override suspend fun removeApiKey(key: String) = Unit
-    override suspend fun getApiKey(): String = "key"
-    override suspend fun saveApiKey(key: String) = Unit
-    override suspend fun clearApiKey() = Unit
+    override suspend fun getProviderKeys(): List<ProviderApiKey> =
+        listOf(ProviderApiKey(provider = ModelProvider.OPEN_ROUTER, key = "key"))
+
+    override suspend fun getApiKey(provider: ModelProvider): String? =
+        if (provider == ModelProvider.OPEN_ROUTER) "key" else null
+
+    override suspend fun saveApiKey(provider: ModelProvider, key: String) = Unit
+
+    override suspend fun clearApiKey(provider: ModelProvider) = Unit
+
+    override suspend fun clearAllApiKeys() = Unit
+
     override suspend fun clearAllLocalData() = Unit
 }
 
@@ -154,8 +163,13 @@ private class RecordingCompareThreadsRepository(
     override suspend fun deleteThread(threadId: Long) = Unit
     override fun observeMessages(threadId: Long): Flow<List<Message>> = messages
 
-    override suspend fun insertUserMessage(threadId: Long, content: String, targetModel: String) {
-        append(role = MessageRole.USER, content = content, model = targetModel)
+    override suspend fun insertUserMessage(
+        threadId: Long,
+        content: String,
+        targetModel: String,
+        targetProvider: ModelProvider?,
+    ) {
+        append(role = MessageRole.USER, content = content, provider = targetProvider, model = targetModel)
     }
 
     override suspend fun insertAssistantMessage(
@@ -166,19 +180,19 @@ private class RecordingCompareThreadsRepository(
         latencyMs: Long?,
         estimatedCost: Double?,
     ) {
-        append(role = MessageRole.ASSISTANT, content = content, model = model)
+        append(role = MessageRole.ASSISTANT, content = content, provider = provider, model = model)
     }
 
     override suspend fun updateThreadMetadata(threadId: Long, updatedAt: Long) = Unit
 
-    private fun append(role: MessageRole, content: String, model: String?) {
+    private fun append(role: MessageRole, content: String, provider: ModelProvider?, model: String?) {
         val nextId = messages.value.size + 1L
         messages.value = messages.value + Message(
             id = nextId,
             threadId = 1L,
             role = role,
             content = content,
-            provider = if (role == MessageRole.ASSISTANT) ModelProvider.OPEN_ROUTER else null,
+            provider = provider,
             model = model,
             latencyMs = if (role == MessageRole.ASSISTANT) 100L else null,
             estimatedCost = if (role == MessageRole.ASSISTANT) 0.001 else null,

@@ -8,6 +8,7 @@ import com.ivnsrg.aicontrolcentre.core.model.MessageRole
 import com.ivnsrg.aicontrolcentre.core.model.ModelCatalogEntry
 import com.ivnsrg.aicontrolcentre.core.model.ModelProvider
 import com.ivnsrg.aicontrolcentre.core.model.ModelsRepository
+import com.ivnsrg.aicontrolcentre.core.model.ProviderApiKey
 import com.ivnsrg.aicontrolcentre.core.model.SettingsRepository
 import com.ivnsrg.aicontrolcentre.core.model.Thread
 import com.ivnsrg.aicontrolcentre.core.model.ThreadsRepository
@@ -113,6 +114,7 @@ class ThreadViewModelTest {
 private class SucceedingChatRepository : ChatRepository {
     override suspend fun sendMessage(
         threadId: Long,
+        provider: ModelProvider,
         modelId: String,
         prompt: String,
         history: List<Message>,
@@ -126,6 +128,7 @@ private class SucceedingChatRepository : ChatRepository {
 
     override fun streamMessage(
         threadId: Long,
+        provider: ModelProvider,
         modelId: String,
         prompt: String,
         history: List<Message>,
@@ -148,6 +151,7 @@ private class SucceedingChatRepository : ChatRepository {
 private class FailingChatRepository : ChatRepository {
     override suspend fun sendMessage(
         threadId: Long,
+        provider: ModelProvider,
         modelId: String,
         prompt: String,
         history: List<Message>,
@@ -157,6 +161,7 @@ private class FailingChatRepository : ChatRepository {
 
     override fun streamMessage(
         threadId: Long,
+        provider: ModelProvider,
         modelId: String,
         prompt: String,
         history: List<Message>,
@@ -184,13 +189,18 @@ private class StaticModelsRepository : ModelsRepository {
 }
 
 private class PresentKeySettingsRepository : SettingsRepository {
-    override suspend fun getApiKeys(): List<String> = listOf("key")
-    override suspend fun getPrimaryApiKey(): String = "key"
-    override suspend fun addApiKey(key: String) = Unit
-    override suspend fun removeApiKey(key: String) = Unit
-    override suspend fun getApiKey(): String = "key"
-    override suspend fun saveApiKey(key: String) = Unit
-    override suspend fun clearApiKey() = Unit
+    override suspend fun getProviderKeys(): List<ProviderApiKey> =
+        listOf(ProviderApiKey(provider = ModelProvider.OPEN_ROUTER, key = "key"))
+
+    override suspend fun getApiKey(provider: ModelProvider): String? =
+        if (provider == ModelProvider.OPEN_ROUTER) "key" else null
+
+    override suspend fun saveApiKey(provider: ModelProvider, key: String) = Unit
+
+    override suspend fun clearApiKey(provider: ModelProvider) = Unit
+
+    override suspend fun clearAllApiKeys() = Unit
+
     override suspend fun clearAllLocalData() = Unit
 }
 
@@ -202,10 +212,16 @@ private class RecordingThreadsRepository : ThreadsRepository {
     override suspend fun deleteThread(threadId: Long) = Unit
     override fun observeMessages(threadId: Long): Flow<List<Message>> = messages
 
-    override suspend fun insertUserMessage(threadId: Long, content: String, targetModel: String) {
+    override suspend fun insertUserMessage(
+        threadId: Long,
+        content: String,
+        targetModel: String,
+        targetProvider: ModelProvider?,
+    ) {
         append(
             role = MessageRole.USER,
             content = content,
+            provider = targetProvider,
             model = targetModel,
             latencyMs = null,
             estimatedCost = null,
@@ -223,6 +239,7 @@ private class RecordingThreadsRepository : ThreadsRepository {
         append(
             role = MessageRole.ASSISTANT,
             content = content,
+            provider = provider,
             model = model,
             latencyMs = latencyMs,
             estimatedCost = estimatedCost,
@@ -234,6 +251,7 @@ private class RecordingThreadsRepository : ThreadsRepository {
     private fun append(
         role: MessageRole,
         content: String,
+        provider: ModelProvider?,
         model: String?,
         latencyMs: Long?,
         estimatedCost: Double?,
@@ -244,7 +262,7 @@ private class RecordingThreadsRepository : ThreadsRepository {
             threadId = 1L,
             role = role,
             content = content,
-            provider = if (role == MessageRole.ASSISTANT) ModelProvider.OPEN_ROUTER else null,
+            provider = provider,
             model = model,
             latencyMs = latencyMs,
             estimatedCost = estimatedCost,

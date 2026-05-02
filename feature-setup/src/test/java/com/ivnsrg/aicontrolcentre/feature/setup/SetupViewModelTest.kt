@@ -1,5 +1,7 @@
 package com.ivnsrg.aicontrolcentre.feature.setup
 
+import com.ivnsrg.aicontrolcentre.core.model.ModelProvider
+import com.ivnsrg.aicontrolcentre.core.model.ProviderApiKey
 import com.ivnsrg.aicontrolcentre.core.model.SettingsRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -29,7 +31,7 @@ class SetupViewModelTest {
 
             val state = viewModel.uiState.value
             assertEquals(SetupSaveStatus.Saved, state.saveStatus)
-            assertTrue(state.saveMessage?.contains("Ключ сохранён") == true)
+            assertTrue(state.saveMessage?.contains("saved locally") == true)
         } finally {
             Dispatchers.resetMain()
         }
@@ -37,28 +39,22 @@ class SetupViewModelTest {
 }
 
 private class FakeSetupSettingsRepository : SettingsRepository {
-    private val keys = mutableListOf<String>()
+    private val keys = linkedMapOf<ModelProvider, String>()
 
-    override suspend fun getApiKeys(): List<String> = keys.toList()
+    override suspend fun getProviderKeys(): List<ProviderApiKey> =
+        keys.map { (provider, key) -> ProviderApiKey(provider = provider, key = key) }
 
-    override suspend fun getPrimaryApiKey(): String? = keys.firstOrNull()
+    override suspend fun getApiKey(provider: ModelProvider): String? = keys[provider]
 
-    override suspend fun addApiKey(key: String) {
-        keys.remove(key)
-        keys.add(0, key)
+    override suspend fun saveApiKey(provider: ModelProvider, key: String) {
+        keys[provider] = key
     }
 
-    override suspend fun removeApiKey(key: String) {
-        keys.remove(key)
+    override suspend fun clearApiKey(provider: ModelProvider) {
+        keys.remove(provider)
     }
 
-    override suspend fun getApiKey(): String? = getPrimaryApiKey()
-
-    override suspend fun saveApiKey(key: String) {
-        addApiKey(key)
-    }
-
-    override suspend fun clearApiKey() {
+    override suspend fun clearAllApiKeys() {
         keys.clear()
     }
 

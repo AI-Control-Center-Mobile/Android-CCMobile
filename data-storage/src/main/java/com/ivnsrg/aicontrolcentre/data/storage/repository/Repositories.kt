@@ -3,6 +3,7 @@ package com.ivnsrg.aicontrolcentre.data.storage.repository
 import com.ivnsrg.aicontrolcentre.core.model.MessageRole
 import com.ivnsrg.aicontrolcentre.core.model.ModelProvider
 import com.ivnsrg.aicontrolcentre.core.model.Project
+import com.ivnsrg.aicontrolcentre.core.model.ProviderApiKey
 import com.ivnsrg.aicontrolcentre.core.model.ProjectsRepository
 import com.ivnsrg.aicontrolcentre.core.model.SettingsRepository
 import com.ivnsrg.aicontrolcentre.core.model.Thread
@@ -73,13 +74,18 @@ class DefaultThreadsRepository(
     override fun observeMessages(threadId: Long) =
         messagesDao.observeMessages(threadId).map { items -> items.map { it.toDomain() } }
 
-    override suspend fun insertUserMessage(threadId: Long, content: String, targetModel: String) {
+    override suspend fun insertUserMessage(
+        threadId: Long,
+        content: String,
+        targetModel: String,
+        targetProvider: ModelProvider?,
+    ) {
         messagesDao.insert(
             MessageEntity(
                 threadId = threadId,
                 role = MessageRole.USER.name,
                 content = content,
-                provider = null,
+                provider = targetProvider?.name,
                 model = targetModel,
                 latencyMs = null,
                 estimatedCost = null,
@@ -124,38 +130,31 @@ class DefaultSettingsRepository(
     private val appPreferencesStore: AppPreferencesStore,
     private val demoWorkspaceSeeder: DemoWorkspaceSeeder = DemoWorkspaceSeeder(database),
 ) : SettingsRepository {
-    override suspend fun getApiKeys(): List<String> = secureApiKeyStorage.getApiKeys()
+    override suspend fun getProviderKeys(): List<ProviderApiKey> = secureApiKeyStorage.getProviderKeys()
 
-    override suspend fun getPrimaryApiKey(): String? = secureApiKeyStorage.getPrimaryApiKey()
-
-    override suspend fun addApiKey(key: String) {
-        secureApiKeyStorage.addApiKey(key)
-        demoWorkspaceSeeder.seedIfEmpty()
-    }
-
-    override suspend fun removeApiKey(key: String) {
-        secureApiKeyStorage.removeApiKey(key)
-    }
-
-    override suspend fun getApiKey(): String? {
-        val apiKey = secureApiKeyStorage.getApiKey()
+    override suspend fun getApiKey(provider: ModelProvider): String? {
+        val apiKey = secureApiKeyStorage.getApiKey(provider)
         if (!apiKey.isNullOrBlank()) {
             demoWorkspaceSeeder.seedIfEmpty()
         }
         return apiKey
     }
 
-    override suspend fun saveApiKey(key: String) {
-        secureApiKeyStorage.saveApiKey(key)
+    override suspend fun saveApiKey(provider: ModelProvider, key: String) {
+        secureApiKeyStorage.saveApiKey(provider, key)
         demoWorkspaceSeeder.seedIfEmpty()
     }
 
-    override suspend fun clearApiKey() {
-        secureApiKeyStorage.clearApiKey()
+    override suspend fun clearApiKey(provider: ModelProvider) {
+        secureApiKeyStorage.clearApiKey(provider)
+    }
+
+    override suspend fun clearAllApiKeys() {
+        secureApiKeyStorage.clearAllApiKeys()
     }
 
     override suspend fun clearAllLocalData() {
-        secureApiKeyStorage.clearApiKey()
+        secureApiKeyStorage.clearAllApiKeys()
         database.clearAllTables()
         appPreferencesStore.clear()
     }

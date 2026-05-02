@@ -59,6 +59,37 @@ data class OpenRouterKeyDiagnostics(
     val limitReset: String? = null,
 )
 
+data class ProviderQuotaValue(
+    val label: String,
+    val value: String,
+)
+
+enum class ProviderQuotaStatus {
+    AVAILABLE,
+    UNAVAILABLE,
+    ERROR,
+}
+
+enum class ProviderQuotaSource {
+    LIVE,
+    SNAPSHOT,
+}
+
+data class ProviderQuotaSnapshot(
+    val provider: ModelProvider,
+    val status: ProviderQuotaStatus,
+    val headline: String,
+    val values: List<ProviderQuotaValue> = emptyList(),
+    val detail: String? = null,
+    val updatedAt: Long? = null,
+    val source: ProviderQuotaSource = ProviderQuotaSource.LIVE,
+)
+
+data class ProviderApiKey(
+    val provider: ModelProvider,
+    val key: String,
+)
+
 data class AssistantMessageDraft(
     val content: String,
     val provider: ModelProvider,
@@ -90,6 +121,26 @@ enum class MessageRole {
 
 enum class ModelProvider {
     OPEN_ROUTER,
+    GROQ,
+    SILICON_FLOW,
+    ;
+
+    val displayName: String
+        get() = when (this) {
+            OPEN_ROUTER -> "OpenRouter"
+            GROQ -> "Groq"
+            SILICON_FLOW -> "SiliconFlow"
+        }
+
+    val keyLabel: String
+        get() = "$displayName API key"
+
+    val keyPlaceholder: String
+        get() = when (this) {
+            OPEN_ROUTER -> "sk-or-v1-..."
+            GROQ -> "gsk_..."
+            SILICON_FLOW -> "sk-..."
+        }
 }
 
 enum class CompareWinner {
@@ -143,7 +194,12 @@ interface ThreadsRepository {
     suspend fun createThread(projectId: Long, title: String? = null): Long
     suspend fun deleteThread(threadId: Long)
     fun observeMessages(threadId: Long): Flow<List<Message>>
-    suspend fun insertUserMessage(threadId: Long, content: String, targetModel: String)
+    suspend fun insertUserMessage(
+        threadId: Long,
+        content: String,
+        targetModel: String,
+        targetProvider: ModelProvider?,
+    )
     suspend fun insertAssistantMessage(
         threadId: Long,
         content: String,
@@ -157,14 +213,14 @@ interface ThreadsRepository {
 }
 
 interface SettingsRepository {
-    suspend fun getApiKeys(): List<String>
-    suspend fun getPrimaryApiKey(): String?
-    suspend fun addApiKey(key: String)
-    suspend fun removeApiKey(key: String)
-    suspend fun getApiKey(): String?
-    suspend fun saveApiKey(key: String)
-    suspend fun clearApiKey()
+    suspend fun getProviderKeys(): List<ProviderApiKey>
+    suspend fun getApiKey(provider: ModelProvider): String?
+    suspend fun saveApiKey(provider: ModelProvider, key: String)
+    suspend fun clearApiKey(provider: ModelProvider)
+    suspend fun clearAllApiKeys()
     suspend fun clearAllLocalData()
+
+    suspend fun hasAnyApiKeys(): Boolean = getProviderKeys().isNotEmpty()
 }
 
 interface ModelsRepository {
@@ -176,9 +232,22 @@ interface OpenRouterDiagnosticsRepository {
     suspend fun getCurrentKeyDiagnostics(): OpenRouterKeyDiagnostics
 }
 
+interface ProviderQuotaRepository {
+    suspend fun getQuotaSnapshots(): List<ProviderQuotaSnapshot>
+    suspend fun refreshQuotaSnapshots(): List<ProviderQuotaSnapshot>
+    suspend fun recordRateLimitSnapshot(
+        provider: ModelProvider,
+        remainingRequests: String?,
+        remainingTokens: String?,
+        resetRequests: String?,
+        resetTokens: String?,
+    )
+}
+
 interface ChatRepository {
     suspend fun sendMessage(
         threadId: Long,
+        provider: ModelProvider,
         modelId: String,
         prompt: String,
         history: List<Message>,
@@ -186,6 +255,7 @@ interface ChatRepository {
 
     fun streamMessage(
         threadId: Long,
+        provider: ModelProvider,
         modelId: String,
         prompt: String,
         history: List<Message>,
@@ -195,7 +265,9 @@ interface ChatRepository {
 interface CompareRepository {
     suspend fun compare(
         threadId: Long,
+        providerA: ModelProvider,
         modelA: String,
+        providerB: ModelProvider,
         modelB: String,
         prompt: String,
         history: List<Message>,
@@ -203,6 +275,7 @@ interface CompareRepository {
 
     fun streamModelResponse(
         threadId: Long,
+        provider: ModelProvider,
         modelId: String,
         prompt: String,
         history: List<Message>,

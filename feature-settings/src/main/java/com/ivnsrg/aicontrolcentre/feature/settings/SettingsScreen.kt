@@ -1,5 +1,6 @@
 package com.ivnsrg.aicontrolcentre.feature.settings
 
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -8,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -23,12 +25,15 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.ivnsrg.aicontrolcentre.core.model.OpenRouterDiagnosticsRepository
-import com.ivnsrg.aicontrolcentre.core.model.OpenRouterKeyDiagnostics
+import com.ivnsrg.aicontrolcentre.core.model.ModelProvider
+import com.ivnsrg.aicontrolcentre.core.model.ProviderApiKey
+import com.ivnsrg.aicontrolcentre.core.model.ProviderQuotaRepository
+import com.ivnsrg.aicontrolcentre.core.model.ProviderQuotaSnapshot
+import com.ivnsrg.aicontrolcentre.core.model.ProviderQuotaSource
+import com.ivnsrg.aicontrolcentre.core.model.ProviderQuotaStatus
 import com.ivnsrg.aicontrolcentre.core.model.SettingsRepository
-import com.ivnsrg.aicontrolcentre.core.model.toReadableMessage
-import com.ivnsrg.aicontrolcentre.core.model.toUiError
 import com.ivnsrg.aicontrolcentre.core.ui.components.AppCard
+import com.ivnsrg.aicontrolcentre.core.ui.components.AppDropdownField
 import com.ivnsrg.aicontrolcentre.core.ui.components.AppScreenScaffold
 import com.ivnsrg.aicontrolcentre.core.ui.components.AppTextField
 import com.ivnsrg.aicontrolcentre.core.ui.components.BadgeTone
@@ -39,8 +44,8 @@ import com.ivnsrg.aicontrolcentre.core.ui.components.HeaderDensity
 import com.ivnsrg.aicontrolcentre.core.ui.components.MetadataChip
 import com.ivnsrg.aicontrolcentre.core.ui.components.OperationalCard
 import com.ivnsrg.aicontrolcentre.core.ui.components.PrimaryButton
-import com.ivnsrg.aicontrolcentre.core.ui.components.SectionLabel
 import com.ivnsrg.aicontrolcentre.core.ui.components.SectionHeader
+import com.ivnsrg.aicontrolcentre.core.ui.components.SectionLabel
 import com.ivnsrg.aicontrolcentre.core.ui.components.SecondaryButton
 import com.ivnsrg.aicontrolcentre.core.ui.components.StatusBadge
 import com.ivnsrg.aicontrolcentre.core.ui.theme.LocalSpacing
@@ -48,21 +53,22 @@ import com.ivnsrg.aicontrolcentre.core.ui.theme.appColors
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 data class SettingsUiState(
-    val apiKeys: List<String> = emptyList(),
+    val providerKeys: List<ProviderApiKey> = emptyList(),
+    val selectedProvider: ModelProvider = ModelProvider.OPEN_ROUTER,
     val keyDraft: String = "",
     val saveStatus: SettingsSaveStatus = SettingsSaveStatus.Idle,
     val saveMessage: String? = null,
     val isClearing: Boolean = false,
-    val diagnostics: OpenRouterKeyDiagnostics? = null,
-    val isLoadingDiagnostics: Boolean = false,
-    val diagnosticsMessage: String? = null,
-) {
-    val hasApiKeys: Boolean
-        get() = apiKeys.isNotEmpty()
-}
+    val quotaSnapshots: List<ProviderQuotaSnapshot> = emptyList(),
+    val isLoadingQuota: Boolean = false,
+)
 
 enum class SettingsSaveStatus {
     Idle,
@@ -73,7 +79,7 @@ enum class SettingsSaveStatus {
 
 class SettingsViewModel(
     private val settingsRepository: SettingsRepository,
-    private val diagnosticsRepository: OpenRouterDiagnosticsRepository,
+    private val providerQuotaRepository: ProviderQuotaRepository,
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(SettingsUiState())
     val uiState: StateFlow<SettingsUiState> = _uiState.asStateFlow()
@@ -82,88 +88,97 @@ class SettingsViewModel(
         refresh()
     }
 
+    fun selectProvider(provider: ModelProvider) {
+        _uiState.update {
+            it.copy(
+                selectedProvider = provider,
+                saveStatus = SettingsSaveStatus.Idle,
+                saveMessage = null,
+            )
+        }
+    }
+
     fun updateKeyDraft(value: String) {
-        _uiState.value = _uiState.value.copy(
-            keyDraft = value,
-            saveStatus = SettingsSaveStatus.Idle,
-            saveMessage = null,
-        )
+        _uiState.update {
+            it.copy(
+                keyDraft = value,
+                saveStatus = SettingsSaveStatus.Idle,
+                saveMessage = null,
+            )
+        }
     }
 
     fun refresh() {
         viewModelScope.launch {
-            val keys = settingsRepository.getApiKeys()
-            _uiState.value = _uiState.value.copy(
-                apiKeys = keys,
-                diagnostics = if (keys.isEmpty()) null else _uiState.value.diagnostics,
-                diagnosticsMessage = if (keys.isEmpty()) null else _uiState.value.diagnosticsMessage,
-                isLoadingDiagnostics = keys.isNotEmpty(),
-            )
-            refreshDiagnostics(keys)
-        }
-    }
-
-    fun addKey() {
-        val trimmed = _uiState.value.keyDraft.trim()
-        if (trimmed.isBlank()) {
-            _uiState.value = _uiState.value.copy(
-                saveStatus = SettingsSaveStatus.Failed,
-                saveMessage = "Введите OpenRouter API key",
-            )
-            return
-        }
-        viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(
-                saveStatus = SettingsSaveStatus.Saving,
-                saveMessage = null,
-            )
-            settingsRepository.addApiKey(trimmed)
-            val keys = settingsRepository.getApiKeys()
-            val savedKey = settingsRepository.getPrimaryApiKey()
-            val wasPersisted = trimmed in keys
-            _uiState.value = _uiState.value.copy(
-                apiKeys = keys,
-                keyDraft = if (wasPersisted) "" else trimmed,
-                saveStatus = if (wasPersisted) SettingsSaveStatus.Saved else SettingsSaveStatus.Failed,
-                saveMessage = if (wasPersisted) {
-                    "Ключ сохранён: ${maskApiKey(savedKey ?: trimmed)}"
-                } else {
-                    "Не удалось подтвердить сохранение ключа"
-                },
-                isLoadingDiagnostics = wasPersisted,
-                diagnosticsMessage = if (wasPersisted) null else _uiState.value.diagnosticsMessage,
-            )
-            if (wasPersisted) {
-                refreshDiagnostics(keys)
+            val keys = settingsRepository.getProviderKeys()
+            val quotas = providerQuotaRepository.getQuotaSnapshots()
+            _uiState.update {
+                it.copy(
+                    providerKeys = keys,
+                    quotaSnapshots = quotas,
+                    isLoadingQuota = false,
+                )
             }
         }
     }
 
+    fun saveKey() {
+        val state = _uiState.value
+        val trimmed = state.keyDraft.trim()
+        if (trimmed.isBlank()) {
+            _uiState.update {
+                it.copy(
+                    saveStatus = SettingsSaveStatus.Failed,
+                    saveMessage = "Enter a key before saving.",
+                )
+            }
+            return
+        }
+
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    saveStatus = SettingsSaveStatus.Saving,
+                    saveMessage = null,
+                )
+            }
+            settingsRepository.saveApiKey(state.selectedProvider, trimmed)
+            val keys = settingsRepository.getProviderKeys()
+            val persisted = keys.firstOrNull { it.provider == state.selectedProvider }?.key
+            _uiState.update {
+                it.copy(
+                    providerKeys = keys,
+                    keyDraft = if (persisted != null) "" else trimmed,
+                    saveStatus = if (persisted != null) SettingsSaveStatus.Saved else SettingsSaveStatus.Failed,
+                    saveMessage = if (persisted != null) {
+                        "${state.selectedProvider.displayName} key saved locally."
+                    } else {
+                        "Could not confirm the saved key."
+                    },
+                )
+            }
+            refreshQuota()
+        }
+    }
+
     fun removeKey(
-        key: String,
+        provider: ModelProvider,
         onAllKeysRemoved: () -> Unit,
     ) {
         viewModelScope.launch {
-            settingsRepository.removeApiKey(key)
-            val keys = settingsRepository.getApiKeys()
-            _uiState.value = _uiState.value.copy(
-                apiKeys = keys,
-                saveStatus = SettingsSaveStatus.Idle,
-                saveMessage = null,
-                diagnostics = if (keys.isEmpty()) null else _uiState.value.diagnostics,
-                diagnosticsMessage = if (keys.isEmpty()) null else _uiState.value.diagnosticsMessage,
-                isLoadingDiagnostics = keys.isNotEmpty(),
-            )
-            refreshDiagnostics(keys)
+            settingsRepository.clearApiKey(provider)
+            val keys = settingsRepository.getProviderKeys()
+            _uiState.update { it.copy(providerKeys = keys) }
+            refreshQuota()
             if (keys.isEmpty()) {
                 onAllKeysRemoved()
             }
         }
     }
 
-    fun clearKeys(onDone: () -> Unit) {
+    fun clearAllKeys(onDone: () -> Unit) {
         viewModelScope.launch {
-            settingsRepository.clearApiKey()
+            settingsRepository.clearAllApiKeys()
             _uiState.value = SettingsUiState()
             onDone()
         }
@@ -171,68 +186,36 @@ class SettingsViewModel(
 
     fun clearAllData(onDone: () -> Unit) {
         viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(isClearing = true)
+            _uiState.update { it.copy(isClearing = true) }
             try {
                 settingsRepository.clearAllLocalData()
                 _uiState.value = SettingsUiState()
                 onDone()
             } finally {
                 if (_uiState.value != SettingsUiState()) {
-                    _uiState.value = _uiState.value.copy(isClearing = false)
+                    _uiState.update { it.copy(isClearing = false) }
                 }
             }
         }
     }
 
-    fun refreshDiagnostics() {
+    fun refreshQuota() {
         viewModelScope.launch {
-            val keys = settingsRepository.getApiKeys()
-            _uiState.value = _uiState.value.copy(
-                apiKeys = keys,
-                isLoadingDiagnostics = keys.isNotEmpty(),
-                diagnosticsMessage = null,
-                diagnostics = if (keys.isEmpty()) null else _uiState.value.diagnostics,
-            )
-            refreshDiagnostics(keys)
-        }
-    }
-
-    private suspend fun refreshDiagnostics(keys: List<String>) {
-        if (keys.isEmpty()) {
-            _uiState.value = _uiState.value.copy(
-                diagnostics = null,
-                diagnosticsMessage = null,
-                isLoadingDiagnostics = false,
-            )
-            return
-        }
-
-        runCatching {
-            diagnosticsRepository.getCurrentKeyDiagnostics()
-        }.onSuccess { diagnostics ->
-            _uiState.value = _uiState.value.copy(
-                diagnostics = diagnostics,
-                diagnosticsMessage = null,
-                isLoadingDiagnostics = false,
-            )
-        }.onFailure { throwable ->
-            _uiState.value = _uiState.value.copy(
-                diagnostics = null,
-                diagnosticsMessage = throwable.toUiError().toReadableMessage(),
-                isLoadingDiagnostics = false,
-            )
+            _uiState.update { it.copy(isLoadingQuota = true) }
+            val quotas = providerQuotaRepository.refreshQuotaSnapshots()
+            _uiState.update { it.copy(quotaSnapshots = quotas, isLoadingQuota = false) }
         }
     }
 }
 
 class SettingsViewModelFactory(
     private val settingsRepository: SettingsRepository,
-    private val diagnosticsRepository: OpenRouterDiagnosticsRepository,
+    private val providerQuotaRepository: ProviderQuotaRepository,
 ) : ViewModelProvider.Factory {
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         if (modelClass.isAssignableFrom(SettingsViewModel::class.java)) {
             @Suppress("UNCHECKED_CAST")
-            return SettingsViewModel(settingsRepository, diagnosticsRepository) as T
+            return SettingsViewModel(settingsRepository, providerQuotaRepository) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
     }
@@ -241,38 +224,38 @@ class SettingsViewModelFactory(
 @Composable
 fun SettingsRoute(
     settingsRepository: SettingsRepository,
-    diagnosticsRepository: OpenRouterDiagnosticsRepository,
+    providerQuotaRepository: ProviderQuotaRepository,
     onApiKeyRemoved: () -> Unit,
 ) {
     val viewModel: SettingsViewModel = viewModel(
-        factory = SettingsViewModelFactory(settingsRepository, diagnosticsRepository),
+        factory = SettingsViewModelFactory(settingsRepository, providerQuotaRepository),
     )
     val uiState by viewModel.uiState.collectAsState()
-    var pendingRemoveKey by remember { mutableStateOf<String?>(null) }
+    var pendingRemoveProvider by remember { mutableStateOf<ModelProvider?>(null) }
     var showClearKeysDialog by remember { mutableStateOf(false) }
     var showClearAllDialog by remember { mutableStateOf(false) }
 
-    pendingRemoveKey?.let { key ->
+    pendingRemoveProvider?.let { provider ->
         ConfirmDialog(
             title = "Remove saved key?",
-            message = "This removes the selected API key. If it is the last key, the app will return to setup.",
+            message = "This removes the selected provider key. If it is the last configured key, the app will return to setup.",
             confirmText = "Remove",
             onConfirm = {
-                pendingRemoveKey = null
-                viewModel.removeKey(key, onApiKeyRemoved)
+                pendingRemoveProvider = null
+                viewModel.removeKey(provider, onApiKeyRemoved)
             },
-            onDismiss = { pendingRemoveKey = null },
+            onDismiss = { pendingRemoveProvider = null },
         )
     }
 
     if (showClearKeysDialog) {
         ConfirmDialog(
-            title = "Clear all API keys?",
-            message = "This removes saved OpenRouter keys only. Projects, threads and messages stay on device.",
+            title = "Clear all provider keys?",
+            message = "This removes saved provider keys only. Projects, threads and messages stay on device.",
             confirmText = "Clear keys",
             onConfirm = {
                 showClearKeysDialog = false
-                viewModel.clearKeys(onApiKeyRemoved)
+                viewModel.clearAllKeys(onApiKeyRemoved)
             },
             onDismiss = { showClearKeysDialog = false },
         )
@@ -280,9 +263,9 @@ fun SettingsRoute(
 
     if (showClearAllDialog) {
         ConfirmDialog(
-            title = "Очистить все локальные данные?",
-            message = "Будут удалены API key, проекты, треды и сообщения.",
-            confirmText = "Очистить",
+            title = "Clear all local data?",
+            message = "This removes saved keys, projects, threads and messages.",
+            confirmText = "Clear data",
             onConfirm = {
                 showClearAllDialog = false
                 viewModel.clearAllData(onApiKeyRemoved)
@@ -293,27 +276,30 @@ fun SettingsRoute(
 
     SettingsScreen(
         uiState = uiState,
+        onProviderSelected = viewModel::selectProvider,
         onDraftChange = viewModel::updateKeyDraft,
-        onAddKey = viewModel::addKey,
-        onRemoveKey = { pendingRemoveKey = it },
+        onSaveKey = viewModel::saveKey,
+        onRemoveKey = { pendingRemoveProvider = it },
         onClearKeys = { showClearKeysDialog = true },
         onClearAll = { showClearAllDialog = true },
-        onRefreshDiagnostics = viewModel::refreshDiagnostics,
+        onRefreshQuota = viewModel::refreshQuota,
     )
 }
 
 @Composable
 fun SettingsScreen(
     uiState: SettingsUiState,
+    onProviderSelected: (ModelProvider) -> Unit,
     onDraftChange: (String) -> Unit,
-    onAddKey: () -> Unit,
-    onRemoveKey: (String) -> Unit,
+    onSaveKey: () -> Unit,
+    onRemoveKey: (ModelProvider) -> Unit,
     onClearKeys: () -> Unit,
     onClearAll: () -> Unit,
-    onRefreshDiagnostics: () -> Unit,
+    onRefreshQuota: () -> Unit,
 ) {
     val colors = MaterialTheme.appColors
     val spacing = LocalSpacing.current
+
     AppScreenScaffold(
         title = "Settings",
         subtitle = "Infrastructure and device-local controls",
@@ -330,42 +316,49 @@ fun SettingsScreen(
             item {
                 SectionHeader("INFRASTRUCTURE")
             }
+
             item {
                 AppCard {
                     Column(verticalArrangement = Arrangement.spacedBy(spacing.sm)) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
                         ) {
                             Column(
                                 modifier = Modifier.weight(1f),
                                 verticalArrangement = Arrangement.spacedBy(6.dp),
                             ) {
                                 Text(
-                                    text = "OpenRouter API keys",
+                                    text = "Provider keys",
                                     style = MaterialTheme.typography.titleMedium,
                                     color = colors.textPrimary,
                                     fontWeight = FontWeight.SemiBold,
                                 )
                                 Text(
-                                    text = "Secure local credential storage with automatic key failover.",
+                                    text = "Use a single form to select a provider, paste a key and save it locally.",
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = colors.textSecondary,
                                 )
                             }
                             StatusBadge(
-                                modifier = Modifier.padding(top = 2.dp),
-                                text = if (uiState.hasApiKeys) "ACTIVE" else "MISSING",
-                                tone = if (uiState.hasApiKeys) BadgeTone.Primary else BadgeTone.Warning,
+                                text = if (uiState.providerKeys.isNotEmpty()) "ACTIVE" else "MISSING",
+                                tone = if (uiState.providerKeys.isNotEmpty()) BadgeTone.Primary else BadgeTone.Warning,
                             )
                         }
-
+                        AppDropdownField(
+                            label = "Provider",
+                            selectedText = uiState.selectedProvider.displayName,
+                            options = ModelProvider.entries.map { it.displayName },
+                            onOptionSelected = { index -> onProviderSelected(ModelProvider.entries[index]) },
+                            enabled = !uiState.isClearing && uiState.saveStatus != SettingsSaveStatus.Saving,
+                        )
                         AppTextField(
                             value = uiState.keyDraft,
                             onValueChange = onDraftChange,
-                            label = "Add OpenRouter API key",
-                            placeholder = "sk-or-v1-...",
+                            label = uiState.selectedProvider.keyLabel,
+                            placeholder = uiState.selectedProvider.keyPlaceholder,
                             isSecret = true,
+                            enabled = !uiState.isClearing && uiState.saveStatus != SettingsSaveStatus.Saving,
                         )
                         uiState.saveMessage?.let { message ->
                             MetadataChip(
@@ -379,17 +372,9 @@ fun SettingsScreen(
                             )
                         }
                         PrimaryButton(
-                            text = when (uiState.saveStatus) {
-                                SettingsSaveStatus.Saving -> "Saving…"
-                                else -> "Add key"
-                            },
-                            onClick = onAddKey,
-                            enabled = !uiState.isClearing,
-                        )
-                        SecondaryButton(
-                            text = "Clear saved keys",
-                            onClick = onClearKeys,
-                            enabled = uiState.apiKeys.isNotEmpty() && !uiState.isClearing,
+                            text = if (uiState.saveStatus == SettingsSaveStatus.Saving) "Saving…" else "Save key",
+                            onClick = onSaveKey,
+                            enabled = !uiState.isClearing && uiState.saveStatus != SettingsSaveStatus.Saving,
                         )
                     }
                 }
@@ -399,19 +384,19 @@ fun SettingsScreen(
                 AppCard {
                     Column(verticalArrangement = Arrangement.spacedBy(spacing.sm)) {
                         SectionLabel("Saved keys", tone = BadgeTone.Info)
-                        if (uiState.apiKeys.isEmpty()) {
+                        if (uiState.providerKeys.isEmpty()) {
                             Text(
-                                text = "No saved OpenRouter keys yet.",
+                                text = "No provider keys saved yet.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = colors.textSecondary,
                             )
                         } else {
                             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                uiState.apiKeys.forEachIndexed { index, key ->
-                                    SavedApiKeyRow(
-                                        keyValue = key,
-                                        isPrimary = index == 0,
-                                        onRemove = { onRemoveKey(key) },
+                                uiState.providerKeys.forEach { key ->
+                                    SavedProviderKeyRow(
+                                        provider = key.provider,
+                                        keyValue = key.key,
+                                        onRemove = { onRemoveKey(key.provider) },
                                     )
                                 }
                             }
@@ -423,44 +408,59 @@ fun SettingsScreen(
             item {
                 AppCard {
                     Column(verticalArrangement = Arrangement.spacedBy(spacing.sm)) {
-                        SectionLabel("Quota diagnostics", tone = BadgeTone.Info)
-                        Text(
-                            text = "Current OpenRouter key status and free-tier limits.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = colors.textSecondary,
-                        )
-                        SecondaryButton(
-                            text = if (uiState.isLoadingDiagnostics) "Refreshing…" else "Refresh quota",
-                            onClick = onRefreshDiagnostics,
-                            enabled = uiState.apiKeys.isNotEmpty() && !uiState.isLoadingDiagnostics && !uiState.isClearing,
-                        )
-
-                        when {
-                            uiState.apiKeys.isEmpty() -> {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
                                 Text(
-                                    text = "Add an API key to load quota diagnostics.",
-                                    style = MaterialTheme.typography.bodySmall,
+                                    text = "Provider quota and diagnostics",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = colors.textPrimary,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                                Text(
+                                    text = "Shows the remaining quota each provider actually exposes: live diagnostics, balances, or last known rate-limit snapshots.",
+                                    style = MaterialTheme.typography.bodyMedium,
                                     color = colors.textSecondary,
                                 )
                             }
-
-                            uiState.isLoadingDiagnostics -> {
-                                MetadataChip(text = "Loading diagnostics", tone = BadgeTone.Info)
-                            }
-
-                            uiState.diagnostics != null -> {
-                                KeyDiagnosticsPanel(uiState.diagnostics)
-                            }
-
-                            uiState.diagnosticsMessage != null -> {
-                                MetadataChip(
-                                    text = uiState.diagnosticsMessage,
-                                    tone = BadgeTone.Warning,
-                                )
+                            StatusBadge(
+                                text = if (uiState.quotaSnapshots.any { it.status == ProviderQuotaStatus.AVAILABLE }) "READY" else "WAITING",
+                                tone = if (uiState.quotaSnapshots.any { it.status == ProviderQuotaStatus.AVAILABLE }) BadgeTone.Primary else BadgeTone.Warning,
+                            )
+                        }
+                        SecondaryButton(
+                            text = if (uiState.isLoadingQuota) "Refreshing…" else "Refresh provider data",
+                            onClick = onRefreshQuota,
+                            enabled = !uiState.isClearing && !uiState.isLoadingQuota,
+                        )
+                        if (uiState.quotaSnapshots.isEmpty()) {
+                            Text(
+                                text = "Configure provider keys to load diagnostics and quota data.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.textSecondary,
+                            )
+                        } else {
+                            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                uiState.quotaSnapshots.forEach { snapshot ->
+                                    ProviderQuotaCard(snapshot)
+                                }
                             }
                         }
                     }
                 }
+            }
+
+            item {
+                SecondaryButton(
+                    text = "Clear saved keys",
+                    onClick = onClearKeys,
+                    enabled = uiState.providerKeys.isNotEmpty() && !uiState.isClearing,
+                )
             }
 
             item {
@@ -471,7 +471,7 @@ fun SettingsScreen(
                     MetadataChip(text = "DESTRUCTIVE", tone = BadgeTone.Danger)
                     Column(verticalArrangement = Arrangement.spacedBy(spacing.sm)) {
                         Text(
-                            text = "Permanently remove all local projects, threads, messages and credentials from this device.",
+                            text = "Permanently remove all local projects, threads, messages and saved keys from this device.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = colors.textSecondary,
                         )
@@ -488,62 +488,14 @@ fun SettingsScreen(
 }
 
 @Composable
-private fun KeyDiagnosticsPanel(
-    diagnostics: OpenRouterKeyDiagnostics,
-) {
-    val colors = MaterialTheme.appColors
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            MetadataChip(
-                text = if (diagnostics.isFreeTier) "FREE TIER" else "PAID",
-                tone = if (diagnostics.isFreeTier) BadgeTone.Warning else BadgeTone.Primary,
-            )
-            diagnostics.limitRemaining?.let {
-                MetadataChip(
-                    text = "remaining ${formatQuotaValue(it)}",
-                    tone = BadgeTone.Info,
-                )
-            }
-        }
-        diagnostics.label?.let { label ->
-            Text(
-                text = "Key: $label",
-                style = MaterialTheme.typography.bodySmall,
-                color = colors.textPrimary,
-            )
-        }
-        Text(
-            text = buildString {
-                append("Daily usage: ${formatQuotaValue(diagnostics.usageDaily)}")
-                diagnostics.limitReset?.takeIf { it.isNotBlank() }?.let { reset ->
-                    append(" • Reset: $reset")
-                }
-            },
-            style = MaterialTheme.typography.bodySmall,
-            color = colors.textSecondary,
-        )
-        if (diagnostics.isFreeTier) {
-            Text(
-                text = "Free variants on OpenRouter have stricter limits, including 20 requests per minute and a lower daily cap unless the account has enough purchased credits. One visible send can still coincide with model sync requests if the catalog needs refresh.",
-                style = MaterialTheme.typography.bodySmall,
-                color = colors.textSecondary,
-            )
-        }
-    }
-}
-
-@Composable
-private fun SavedApiKeyRow(
+private fun SavedProviderKeyRow(
+    provider: ModelProvider,
     keyValue: String,
-    isPrimary: Boolean,
     onRemove: () -> Unit,
 ) {
     val colors = MaterialTheme.appColors
     OperationalCard(
-        tone = if (isPrimary) CardTone.Surface1 else CardTone.Surface3,
+        tone = CardTone.Surface3,
         padding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
     ) {
         Row(
@@ -552,10 +504,8 @@ private fun SavedApiKeyRow(
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    MetadataChip(
-                        text = if (isPrimary) "Primary" else "Fallback",
-                        tone = if (isPrimary) BadgeTone.Primary else BadgeTone.Neutral,
-                    )
+                    MetadataChip(text = provider.displayName, tone = BadgeTone.Info)
+                    MetadataChip(text = "Saved key", tone = BadgeTone.Neutral)
                 }
                 Text(
                     text = maskApiKey(keyValue),
@@ -572,15 +522,110 @@ private fun SavedApiKeyRow(
     }
 }
 
+@Composable
+private fun ProviderQuotaCard(
+    snapshot: ProviderQuotaSnapshot,
+) {
+    val colors = MaterialTheme.appColors
+    val tone = when (snapshot.status) {
+        ProviderQuotaStatus.AVAILABLE -> CardTone.Surface2
+        ProviderQuotaStatus.UNAVAILABLE -> CardTone.Surface3
+        ProviderQuotaStatus.ERROR -> CardTone.Danger
+    }
+
+    OperationalCard(
+        tone = tone,
+        padding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        MetadataChip(text = snapshot.provider.displayName, tone = BadgeTone.Info)
+                        MetadataChip(
+                            text = when (snapshot.source) {
+                                ProviderQuotaSource.LIVE -> "LIVE"
+                                ProviderQuotaSource.SNAPSHOT -> "SNAPSHOT"
+                            },
+                            tone = if (snapshot.source == ProviderQuotaSource.LIVE) BadgeTone.Primary else BadgeTone.Warning,
+                        )
+                    }
+                    Text(
+                        text = snapshot.headline,
+                        style = MaterialTheme.typography.titleSmall,
+                        color = colors.textPrimary,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+                StatusBadge(
+                    text = when (snapshot.status) {
+                        ProviderQuotaStatus.AVAILABLE -> "AVAILABLE"
+                        ProviderQuotaStatus.UNAVAILABLE -> "NO DATA"
+                        ProviderQuotaStatus.ERROR -> "ERROR"
+                    },
+                    tone = when (snapshot.status) {
+                        ProviderQuotaStatus.AVAILABLE -> BadgeTone.Primary
+                        ProviderQuotaStatus.UNAVAILABLE -> BadgeTone.Warning
+                        ProviderQuotaStatus.ERROR -> BadgeTone.Danger
+                    },
+                )
+            }
+
+            if (snapshot.values.isNotEmpty()) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    snapshot.values.forEach { value ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Text(
+                                text = value.label,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.textSecondary,
+                            )
+                            Text(
+                                text = value.value,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.textPrimary,
+                                fontWeight = FontWeight.Medium,
+                            )
+                        }
+                    }
+                }
+            }
+
+            snapshot.detail?.let { detail ->
+                Text(
+                    text = detail,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.textSecondary,
+                )
+            }
+            snapshot.updatedAt?.let { updatedAt ->
+                Text(
+                    text = "Updated ${formatTimestamp(updatedAt)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.textSecondary,
+                )
+            }
+        }
+    }
+}
+
 internal fun maskApiKey(value: String): String {
     val trimmed = value.trim()
     if (trimmed.length <= 10) return trimmed
     return "${trimmed.take(8)}…${trimmed.takeLast(4)}"
 }
 
-private fun formatQuotaValue(value: Double): String =
-    if (value % 1.0 == 0.0) {
-        value.toInt().toString()
-    } else {
-        String.format("%.2f", value)
-    }
+private fun formatTimestamp(timestamp: Long): String =
+    SimpleDateFormat("dd MMM, HH:mm", Locale.US).format(Date(timestamp))

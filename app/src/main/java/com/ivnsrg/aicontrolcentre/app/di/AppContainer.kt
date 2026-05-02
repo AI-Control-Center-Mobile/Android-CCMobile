@@ -5,15 +5,15 @@ import com.ivnsrg.aicontrolcentre.core.model.ChatRepository
 import com.ivnsrg.aicontrolcentre.core.model.CompareRepository
 import com.ivnsrg.aicontrolcentre.core.model.ModelsRepository
 import com.ivnsrg.aicontrolcentre.core.model.OpenRouterDiagnosticsRepository
+import com.ivnsrg.aicontrolcentre.core.model.ProviderQuotaRepository
 import com.ivnsrg.aicontrolcentre.core.model.ProjectsRepository
 import com.ivnsrg.aicontrolcentre.core.model.SettingsRepository
 import com.ivnsrg.aicontrolcentre.core.model.ThreadsRepository
-import com.ivnsrg.aicontrolcentre.data.network.api.OpenRouterNetworkFactory
-import com.ivnsrg.aicontrolcentre.data.network.api.OpenRouterService
-import com.ivnsrg.aicontrolcentre.data.network.repository.OpenRouterModelsRepository
-import com.ivnsrg.aicontrolcentre.data.network.repository.createOpenRouterChatRepository
-import com.ivnsrg.aicontrolcentre.data.network.repository.createOpenRouterCompareRepository
+import com.ivnsrg.aicontrolcentre.data.network.repository.createUnifiedChatRepository
+import com.ivnsrg.aicontrolcentre.data.network.repository.createUnifiedCompareRepository
+import com.ivnsrg.aicontrolcentre.data.network.repository.createUnifiedModelsRepository
 import com.ivnsrg.aicontrolcentre.data.network.repository.createOpenRouterDiagnosticsRepository
+import com.ivnsrg.aicontrolcentre.data.network.repository.createProviderQuotaRepository
 import com.ivnsrg.aicontrolcentre.data.storage.db.AppDatabase
 import com.ivnsrg.aicontrolcentre.data.storage.db.AppDatabaseFactory
 import com.ivnsrg.aicontrolcentre.data.storage.preferences.AppPreferencesStore
@@ -27,6 +27,7 @@ interface AppContainer {
     val threadsRepository: ThreadsRepository
     val settingsRepository: SettingsRepository
     val openRouterDiagnosticsRepository: OpenRouterDiagnosticsRepository
+    val providerQuotaRepository: ProviderQuotaRepository
     val modelsRepository: ModelsRepository
     val chatRepository: ChatRepository
     val compareRepository: CompareRepository
@@ -41,7 +42,6 @@ class DefaultAppContainer(
 
     private val secureApiKeyStorage by lazy { SecureApiKeyStorage(context) }
     private val preferencesStore by lazy { AppPreferencesStore(context) }
-    private val openRouterService: OpenRouterService by lazy { OpenRouterNetworkFactory.createService() }
 
     override val projectsRepository: ProjectsRepository by lazy {
         DefaultProjectsRepository(database.projectsDao())
@@ -57,15 +57,28 @@ class DefaultAppContainer(
         DefaultSettingsRepository(database, secureApiKeyStorage, preferencesStore)
     }
     override val openRouterDiagnosticsRepository: OpenRouterDiagnosticsRepository by lazy {
-        createOpenRouterDiagnosticsRepository(openRouterService, settingsRepository)
+        createOpenRouterDiagnosticsRepository(settingsRepository)
+    }
+    override val providerQuotaRepository: ProviderQuotaRepository by lazy {
+        createProviderQuotaRepository(
+            settingsRepository = settingsRepository,
+            appPreferencesStore = preferencesStore,
+            openRouterDiagnosticsRepository = openRouterDiagnosticsRepository,
+        )
     }
     override val modelsRepository: ModelsRepository by lazy {
-        OpenRouterModelsRepository(database.modelsDao(), openRouterService, settingsRepository)
+        createUnifiedModelsRepository(database.modelsDao(), settingsRepository)
     }
     override val chatRepository: ChatRepository by lazy {
-        createOpenRouterChatRepository(settingsRepository)
+        createUnifiedChatRepository(
+            settingsRepository = settingsRepository,
+            providerQuotaRepository = providerQuotaRepository,
+        )
     }
     override val compareRepository: CompareRepository by lazy {
-        createOpenRouterCompareRepository(settingsRepository)
+        createUnifiedCompareRepository(
+            settingsRepository = settingsRepository,
+            providerQuotaRepository = providerQuotaRepository,
+        )
     }
 }

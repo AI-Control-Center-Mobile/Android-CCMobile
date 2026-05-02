@@ -2,6 +2,8 @@ package com.ivnsrg.aicontrolcentre.data.storage.security
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.ivnsrg.aicontrolcentre.core.model.ModelProvider
+import com.ivnsrg.aicontrolcentre.core.model.ProviderApiKey
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 
@@ -13,57 +15,65 @@ class SecureApiKeyStorage(
     @Suppress("UNUSED_PARAMETER")
     internal constructor(prefs: SharedPreferences, testOnly: Boolean) : this(prefs)
 
-    fun getApiKeys(): List<String> {
+    fun getProviderKeys(): List<ProviderApiKey> {
         migrateLegacyKeyIfNeeded()
-        return prefs.getString(KEY_API_LIST, null)
-            ?.split(KEY_DELIMITER)
-            ?.map(String::trim)
-            ?.filter(String::isNotBlank)
-            .orEmpty()
+        return ModelProvider.entries.mapNotNull { provider ->
+            prefs.getString(provider.storageKey, null)
+                ?.trim()
+                ?.takeIf(String::isNotBlank)
+                ?.let { ProviderApiKey(provider = provider, key = it) }
+        }
     }
 
-    fun getPrimaryApiKey(): String? = getApiKeys().firstOrNull()
+    fun getApiKey(provider: ModelProvider): String? {
+        migrateLegacyKeyIfNeeded()
+        return prefs.getString(provider.storageKey, null)
+            ?.trim()
+            ?.takeIf(String::isNotBlank)
+    }
 
-    fun getApiKey(): String? = getPrimaryApiKey()
-
-    fun addApiKey(key: String) {
+    fun saveApiKey(provider: ModelProvider, key: String) {
         val normalized = key.trim()
         if (normalized.isBlank()) return
-
-        persistKeys(listOf(normalized) + getApiKeys().filterNot { it == normalized })
-    }
-
-    fun removeApiKey(key: String) {
-        val normalized = key.trim()
-        if (normalized.isBlank()) return
-        persistKeys(getApiKeys().filterNot { it == normalized })
-    }
-
-    fun saveApiKey(key: String) = addApiKey(key)
-
-    fun clearApiKey() {
         prefs.edit()
+            .putString(provider.storageKey, normalized)
+            .apply()
+    }
+
+    fun clearApiKey(provider: ModelProvider) {
+        prefs.edit()
+            .remove(provider.storageKey)
+            .apply()
+    }
+
+    fun clearAllApiKeys() {
+        val editor = prefs.edit()
+        ModelProvider.entries.forEach { provider ->
+            editor.remove(provider.storageKey)
+        }
+        editor
             .remove(KEY_API)
             .remove(KEY_API_LIST)
             .apply()
     }
 
-    private fun persistKeys(keys: List<String>) {
-        prefs.edit()
-            .putString(KEY_API_LIST, keys.joinToString(KEY_DELIMITER))
-            .remove(KEY_API)
-            .apply()
-    }
-
     private fun migrateLegacyKeyIfNeeded() {
-        if (prefs.contains(KEY_API_LIST)) return
+        if (prefs.contains(ModelProvider.OPEN_ROUTER.storageKey)) return
 
-        val legacyKey = prefs.getString(KEY_API, null)
-            ?.trim()
-            ?.takeIf(String::isNotBlank)
+        val legacyKey = prefs.getString(KEY_API_LIST, null)
+            ?.split(KEY_DELIMITER)
+            ?.map(String::trim)
+            ?.firstOrNull(String::isNotBlank)
+            ?: prefs.getString(KEY_API, null)
+                ?.trim()
+                ?.takeIf(String::isNotBlank)
             ?: return
 
-        persistKeys(listOf(legacyKey))
+        prefs.edit()
+            .putString(ModelProvider.OPEN_ROUTER.storageKey, legacyKey)
+            .remove(KEY_API)
+            .remove(KEY_API_LIST)
+            .apply()
     }
 
     companion object {
@@ -87,3 +97,6 @@ class SecureApiKeyStorage(
         }
     }
 }
+
+private val ModelProvider.storageKey: String
+    get() = "provider_api_key_$name"

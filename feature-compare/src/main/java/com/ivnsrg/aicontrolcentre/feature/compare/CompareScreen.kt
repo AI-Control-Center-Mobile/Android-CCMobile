@@ -46,6 +46,7 @@ import com.ivnsrg.aicontrolcentre.core.model.Message
 import com.ivnsrg.aicontrolcentre.core.model.MessageRole
 import com.ivnsrg.aicontrolcentre.core.model.ModelCatalogEntry
 import com.ivnsrg.aicontrolcentre.core.model.ModelPickerMode
+import com.ivnsrg.aicontrolcentre.core.model.ModelProvider
 import com.ivnsrg.aicontrolcentre.core.model.ModelsRepository
 import com.ivnsrg.aicontrolcentre.core.model.SettingsRepository
 import com.ivnsrg.aicontrolcentre.core.model.ThreadsRepository
@@ -89,7 +90,9 @@ enum class CompareCandidateStatus {
 }
 
 data class CompareCandidateUiState(
-    val modelId: String? = null,
+    val selectedModelId: String? = null,
+    val provider: ModelProvider? = null,
+    val model: String? = null,
     val content: String = "",
     val latencyMs: Long? = null,
     val estimatedCost: Double? = null,
@@ -171,7 +174,7 @@ class CompareViewModel(
         viewModelScope.launch {
             _uiState.update { it.copy(isLoadingModels = true, error = UiError.None) }
 
-            if (settingsRepository.getApiKey().isNullOrBlank()) {
+            if (!settingsRepository.hasAnyApiKeys()) {
                 _uiState.update { it.copy(isLoadingModels = false, error = UiError.MissingApiKey) }
                 return@launch
             }
@@ -229,8 +232,8 @@ class CompareViewModel(
     fun compare() {
         val state = _uiState.value
         val prompt = state.promptDraft.trim()
-        val modelA = state.selectedModelA
-        val modelB = state.selectedModelB
+        val modelA = state.selectedModelA?.let { state.models.firstOrNull { model -> model.id == it } }
+        val modelB = state.selectedModelB?.let { state.models.firstOrNull { model -> model.id == it } }
 
         when {
             prompt.isBlank() -> {
@@ -238,12 +241,12 @@ class CompareViewModel(
                 return
             }
 
-            modelA.isNullOrBlank() || modelB.isNullOrBlank() -> {
+            modelA == null || modelB == null -> {
                 _uiState.update { it.copy(error = UiError.Validation("Выбери две модели")) }
                 return
             }
 
-            modelA == modelB -> {
+            modelA.id == modelB.id -> {
                 _uiState.update { it.copy(error = UiError.Validation("Для compare нужны разные модели")) }
                 return
             }
@@ -256,11 +259,15 @@ class CompareViewModel(
                     error = UiError.None,
                     comparedPrompt = prompt,
                     firstCandidate = CompareCandidateUiState(
-                        modelId = modelA,
+                        selectedModelId = modelA.id,
+                        provider = modelA.provider,
+                        model = modelA.model,
                         status = CompareCandidateStatus.Waiting,
                     ),
                     secondCandidate = CompareCandidateUiState(
-                        modelId = modelB,
+                        selectedModelId = modelB.id,
+                        provider = modelB.provider,
+                        model = modelB.model,
                         status = CompareCandidateStatus.Waiting,
                     ),
                 )
@@ -295,12 +302,19 @@ class CompareViewModel(
             return
         }
 
-        val modelId = when (slot) {
-            CompareSlot.FIRST -> state.firstCandidate.modelId ?: state.selectedModelA
-            CompareSlot.SECOND -> state.secondCandidate.modelId ?: state.selectedModelB
+        val modelEntry = when (slot) {
+            CompareSlot.FIRST -> resolveModelEntry(
+                selectedModelId = state.firstCandidate.selectedModelId ?: state.selectedModelA,
+                models = state.models,
+            )
+
+            CompareSlot.SECOND -> resolveModelEntry(
+                selectedModelId = state.secondCandidate.selectedModelId ?: state.selectedModelB,
+                models = state.models,
+            )
         }
 
-        if (modelId.isNullOrBlank()) {
+        if (modelEntry == null) {
             _uiState.update { it.copy(error = UiError.Validation("Нет модели для повторной попытки")) }
             return
         }
@@ -308,7 +322,9 @@ class CompareViewModel(
         _uiState.update {
             val updatedCandidate = when (slot) {
                 CompareSlot.FIRST -> it.firstCandidate.copy(
-                    modelId = modelId,
+                    selectedModelId = modelEntry.id,
+                    provider = modelEntry.provider,
+                    model = modelEntry.model,
                     status = CompareCandidateStatus.Waiting,
                     error = UiError.None,
                     draft = null,
@@ -317,7 +333,9 @@ class CompareViewModel(
                 )
 
                 CompareSlot.SECOND -> it.secondCandidate.copy(
-                    modelId = modelId,
+                    selectedModelId = modelEntry.id,
+                    provider = modelEntry.provider,
+                    model = modelEntry.model,
                     status = CompareCandidateStatus.Waiting,
                     error = UiError.None,
                     draft = null,
@@ -347,12 +365,12 @@ class CompareViewModel(
             runCompareSlots(
                 prompt = prompt,
                 history = state.messages,
-                requests = listOf(slot to modelId),
+                requests = listOf(slot to modelEntry),
             )
         }
     }
 
-    fun continueWithWinner(modelId: String, onDone: (String) -> Unit) {
+    fun continueWithWinner(selectedModelId: String, onDone: (String) -> Unit) {
         val state = _uiState.value
         if (state.isPersistingWinner) return
 
@@ -362,9 +380,9 @@ class CompareViewModel(
             return
         }
 
-        val candidate = when (modelId) {
-            state.firstCandidate.modelId -> state.firstCandidate
-            state.secondCandidate.modelId -> state.secondCandidate
+        val candidate = when (selectedModelId) {
+            state.firstCandidate.selectedModelId -> state.firstCandidate
+            state.secondCandidate.selectedModelId -> state.secondCandidate
             else -> null
         }
 
@@ -384,7 +402,12 @@ class CompareViewModel(
                     ?.content
                     ?.trim()
                 if (latestUserPrompt != prompt) {
-                    threadsRepository.insertUserMessage(threadId, prompt, modelId)
+                    threadsRepository.insertUserMessage(
+                        threadId = threadId,
+                        content = prompt,
+                        targetModel = selectedModelId,
+                        targetProvider = draft.provider,
+                    )
                 }
                 threadsRepository.insertAssistantMessage(
                     threadId = threadId,
@@ -395,7 +418,7 @@ class CompareViewModel(
                     estimatedCost = draft.estimatedCost,
                 )
                 _uiState.update { it.copy(isPersistingWinner = false) }
-                onDone(modelId)
+                onDone(selectedModelId)
             } catch (throwable: Throwable) {
                 _uiState.update { it.copy(isPersistingWinner = false, error = throwable.toUiError()) }
             }
@@ -404,16 +427,24 @@ class CompareViewModel(
 
     private suspend fun collectCandidateStream(
         slot: CompareSlot,
-        modelId: String,
+        model: ModelCatalogEntry,
         prompt: String,
         history: List<Message>,
     ) {
         try {
-            compareRepository.streamModelResponse(threadId, modelId, prompt, history).collectLatest { event ->
+            compareRepository.streamModelResponse(
+                threadId = threadId,
+                provider = model.provider,
+                modelId = model.model,
+                prompt = prompt,
+                history = history,
+            ).collectLatest { event ->
                 when (event) {
                     is AssistantStreamEvent.Streaming -> updateCandidate(slot) { current ->
                         current.copy(
-                            modelId = modelId,
+                            selectedModelId = model.id,
+                            provider = model.provider,
+                            model = model.model,
                             content = event.accumulatedContent,
                             status = when {
                                 event.accumulatedContent.isBlank() -> CompareCandidateStatus.Waiting
@@ -425,7 +456,9 @@ class CompareViewModel(
 
                     is AssistantStreamEvent.Completed -> updateCandidate(slot) { current ->
                         current.copy(
-                            modelId = modelId,
+                            selectedModelId = model.id,
+                            provider = event.draft.provider,
+                            model = event.draft.model,
                             content = event.draft.content,
                             latencyMs = event.draft.latencyMs,
                             estimatedCost = event.draft.estimatedCost,
@@ -439,7 +472,9 @@ class CompareViewModel(
         } catch (throwable: Throwable) {
             updateCandidate(slot) { current ->
                 current.copy(
-                    modelId = modelId,
+                    selectedModelId = model.id,
+                    provider = model.provider,
+                    model = model.model,
                     status = CompareCandidateStatus.Error,
                     error = throwable.toUiError(),
                 )
@@ -450,11 +485,11 @@ class CompareViewModel(
     private suspend fun runCompareSlots(
         prompt: String,
         history: List<Message>,
-        requests: List<Pair<CompareSlot, String>>,
+        requests: List<Pair<CompareSlot, ModelCatalogEntry>>,
     ) {
         supervisorScope {
-            requests.map { (slot, modelId) ->
-                launch { collectCandidateStream(slot, modelId, prompt, history) }
+            requests.map { (slot, model) ->
+                launch { collectCandidateStream(slot, model, prompt, history) }
             }.joinAll()
         }
 
@@ -788,12 +823,12 @@ private fun CompareResultCard(
     onWinnerSelected: (String) -> Unit,
 ) {
     val colors = MaterialTheme.appColors
-    val modelId = candidate.modelId ?: model?.id
-    val canContinue = modelId != null &&
+    val selectionId = candidate.selectedModelId ?: model?.id
+    val canContinue = selectionId != null &&
         candidate.status == CompareCandidateStatus.Completed &&
         candidate.draft != null &&
         !isPersistingWinner
-    val canRetry = modelId != null &&
+    val canRetry = selectionId != null &&
         candidate.status == CompareCandidateStatus.Error &&
         !isComparing &&
         !isPersistingWinner
@@ -812,7 +847,7 @@ private fun CompareResultCard(
                         tone = if (isPrimary) BadgeTone.Primary else BadgeTone.Warning,
                     )
                     Text(
-                        text = model?.label ?: modelId ?: "Unknown model",
+                        text = model?.label ?: candidate.model ?: "Unknown model",
                         style = MaterialTheme.typography.titleMedium,
                         color = colors.textPrimary,
                         fontWeight = FontWeight.SemiBold,
@@ -822,6 +857,12 @@ private fun CompareResultCard(
                     modifier = Modifier.horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
+                    candidate.provider?.let {
+                        MetadataChip(text = it.displayName, tone = BadgeTone.Neutral)
+                    }
+                    candidate.model?.let {
+                        MetadataChip(text = it.substringAfterLast('/'), tone = BadgeTone.Primary)
+                    }
                     candidate.estimatedCost?.let {
                         MetadataChip(text = formatRoundedCost(it), tone = BadgeTone.Info)
                     }
@@ -843,11 +884,18 @@ private fun CompareResultCard(
 
             PrimaryButton(
                 text = if (isPersistingWinner) "Saving…" else "Continue with winner",
-                onClick = { modelId?.let(onWinnerSelected) },
+                onClick = { selectionId?.let(onWinnerSelected) },
                 enabled = canContinue,
             )
         }
     }
+}
+
+private fun resolveModelEntry(
+    selectedModelId: String?,
+    models: List<ModelCatalogEntry>,
+): ModelCatalogEntry? = selectedModelId?.let { selectionId ->
+    models.firstOrNull { it.id == selectionId }
 }
 
 @Composable
@@ -863,7 +911,7 @@ private fun CompareCandidateBody(candidate: CompareCandidateUiState) {
 
         CompareCandidateStatus.Waiting -> {
             StreamingPlaceholder(
-                label = "OpenRouter processing",
+                label = "Provider processing",
                 showMarkdown = candidate.content.isNotBlank(),
                 content = candidate.content,
             )

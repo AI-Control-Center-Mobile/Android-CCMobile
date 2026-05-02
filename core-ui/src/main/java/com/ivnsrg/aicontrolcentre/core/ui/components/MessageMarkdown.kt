@@ -1,6 +1,7 @@
 package com.ivnsrg.aicontrolcentre.core.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -14,7 +15,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -32,6 +36,7 @@ sealed interface MessageMarkdownBlock {
     data class Heading(val level: Int, val text: String) : MessageMarkdownBlock
     data class Paragraph(val text: String) : MessageMarkdownBlock
     data class CodeBlock(val code: String) : MessageMarkdownBlock
+    data class Thought(val text: String) : MessageMarkdownBlock
     data object Divider : MessageMarkdownBlock
     data class Table(
         val header: List<String>,
@@ -88,6 +93,10 @@ fun AssistantMarkdownContent(
                     }
                 }
 
+                is MessageMarkdownBlock.Thought -> {
+                    ReasoningBlock(text = block.text)
+                }
+
                 MessageMarkdownBlock.Divider -> {
                     Box(
                         modifier = Modifier
@@ -126,6 +135,32 @@ fun AssistantMarkdownPreview(
 }
 
 fun parseMarkdownBlocks(raw: String): List<MessageMarkdownBlock> {
+    val normalized = raw.replace("\r\n", "\n")
+    val blocks = mutableListOf<MessageMarkdownBlock>()
+    var cursor = 0
+
+    THINK_REGEX.findAll(normalized).forEach { match ->
+        val before = normalized.substring(cursor, match.range.first)
+        if (before.isNotBlank()) {
+            blocks += parseStandardMarkdownBlocks(before)
+        }
+
+        val thought = match.groupValues[1].trim()
+        if (thought.isNotBlank()) {
+            blocks += MessageMarkdownBlock.Thought(thought)
+        }
+        cursor = match.range.last + 1
+    }
+
+    val tail = normalized.substring(cursor)
+    if (tail.isNotBlank()) {
+        blocks += parseStandardMarkdownBlocks(tail)
+    }
+
+    return if (blocks.isEmpty()) listOf(MessageMarkdownBlock.Paragraph(stripThinkTags(normalized))) else blocks
+}
+
+private fun parseStandardMarkdownBlocks(raw: String): List<MessageMarkdownBlock> {
     val normalized = raw.replace("\r\n", "\n")
     val lines = normalized.split('\n')
     val blocks = mutableListOf<MessageMarkdownBlock>()
@@ -269,6 +304,7 @@ private fun flattenMarkdownBlocksForPreview(blocks: List<MessageMarkdownBlock>):
             is MessageMarkdownBlock.Heading -> block.text.takeIf { it.isNotBlank() }
             is MessageMarkdownBlock.Paragraph -> block.text.takeIf { it.isNotBlank() }
             is MessageMarkdownBlock.CodeBlock -> block.code.trim().takeIf { it.isNotBlank() }
+            is MessageMarkdownBlock.Thought -> null
             MessageMarkdownBlock.Divider -> null
             is MessageMarkdownBlock.Table -> buildString {
                 if (block.header.isNotEmpty()) {
@@ -384,3 +420,42 @@ private fun String.isDivider(): Boolean =
 
 private val HEADING_REGEX = Regex("^(#{1,4})\\s+(.*)$")
 private val TABLE_SEPARATOR_REGEX = Regex("^:?-{3,}:?$")
+private val THINK_REGEX = Regex("<think>(.*?)</think>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+
+@Composable
+private fun ReasoningBlock(
+    text: String,
+) {
+    val colors = MaterialTheme.appColors
+    var expanded by remember(text) { mutableStateOf(false) }
+    val preview = remember(text) {
+        text.replace("\n", " ").trim().let { value ->
+            if (value.length > 120) "${value.take(120)}…" else value
+        }
+    }
+
+    OperationalCard(
+        modifier = Modifier.clickable { expanded = !expanded },
+        tone = CardTone.Surface3,
+        padding = androidx.compose.foundation.layout.PaddingValues(12.dp),
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                MetadataChip(text = "Model reasoning", tone = BadgeTone.Neutral)
+                MetadataChip(
+                    text = if (expanded) "Hide" else "Show",
+                    tone = BadgeTone.Info,
+                )
+            }
+            Text(
+                text = if (expanded) text else preview.ifBlank { "Reasoning hidden." },
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.textSecondary,
+                fontStyle = FontStyle.Italic,
+            )
+        }
+    }
+}
+
+private fun stripThinkTags(text: String): String =
+    THINK_REGEX.replace(text) { "" }.trim()

@@ -1,7 +1,12 @@
 package com.ivnsrg.aicontrolcentre.feature.settings
 
-import com.ivnsrg.aicontrolcentre.core.model.OpenRouterDiagnosticsRepository
-import com.ivnsrg.aicontrolcentre.core.model.OpenRouterKeyDiagnostics
+import com.ivnsrg.aicontrolcentre.core.model.ModelProvider
+import com.ivnsrg.aicontrolcentre.core.model.ProviderApiKey
+import com.ivnsrg.aicontrolcentre.core.model.ProviderQuotaRepository
+import com.ivnsrg.aicontrolcentre.core.model.ProviderQuotaSnapshot
+import com.ivnsrg.aicontrolcentre.core.model.ProviderQuotaSource
+import com.ivnsrg.aicontrolcentre.core.model.ProviderQuotaStatus
+import com.ivnsrg.aicontrolcentre.core.model.ProviderQuotaValue
 import com.ivnsrg.aicontrolcentre.core.model.SettingsRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -23,57 +28,71 @@ class SettingsViewModelTest {
         Dispatchers.setMain(coroutineContext[ContinuationInterceptor] as CoroutineDispatcher)
         try {
             val repository = FakeSettingsRepository()
-            val viewModel = SettingsViewModel(repository, FakeOpenRouterDiagnosticsRepository())
+            val viewModel = SettingsViewModel(repository, FakeProviderQuotaRepository())
 
             viewModel.updateKeyDraft("sk-or-v1-test")
-            viewModel.addKey()
+            viewModel.saveKey()
             advanceUntilIdle()
 
             val state = viewModel.uiState.value
-            assertEquals(listOf("sk-or-v1-test"), state.apiKeys)
+            assertEquals(
+                listOf(ProviderApiKey(provider = ModelProvider.OPEN_ROUTER, key = "sk-or-v1-test")),
+                state.providerKeys,
+            )
             assertEquals("", state.keyDraft)
             assertEquals(SettingsSaveStatus.Saved, state.saveStatus)
-            assertTrue(state.saveMessage?.contains("Ключ сохранён") == true)
-            assertEquals(42.0, state.diagnostics?.limitRemaining ?: 0.0, 0.0)
+            assertTrue(state.saveMessage?.contains("saved locally") == true)
+            assertEquals(1, state.quotaSnapshots.size)
+            assertEquals(42.0, state.quotaSnapshots.single().values.single().value.toDouble(), 0.0)
         } finally {
             Dispatchers.resetMain()
         }
     }
 }
 
-private class FakeOpenRouterDiagnosticsRepository : OpenRouterDiagnosticsRepository {
-    override suspend fun getCurrentKeyDiagnostics(): OpenRouterKeyDiagnostics = OpenRouterKeyDiagnostics(
-        label = "Primary",
-        isFreeTier = true,
-        limitRemaining = 42.0,
-        usageDaily = 8.0,
-        limitReset = "daily",
+private class FakeProviderQuotaRepository : ProviderQuotaRepository {
+    private val snapshots = listOf(
+        ProviderQuotaSnapshot(
+            provider = ModelProvider.OPEN_ROUTER,
+            status = ProviderQuotaStatus.AVAILABLE,
+            headline = "OpenRouter free-tier limits",
+            values = listOf(ProviderQuotaValue("Remaining", "42.0")),
+            detail = "Key: Primary",
+            updatedAt = 1L,
+            source = ProviderQuotaSource.LIVE,
+        ),
     )
+
+    override suspend fun getQuotaSnapshots(): List<ProviderQuotaSnapshot> = snapshots
+
+    override suspend fun refreshQuotaSnapshots(): List<ProviderQuotaSnapshot> = snapshots
+
+    override suspend fun recordRateLimitSnapshot(
+        provider: ModelProvider,
+        remainingRequests: String?,
+        remainingTokens: String?,
+        resetRequests: String?,
+        resetTokens: String?,
+    ) = Unit
 }
 
 private class FakeSettingsRepository : SettingsRepository {
-    private val keys = mutableListOf<String>()
+    private val keys = linkedMapOf<ModelProvider, String>()
 
-    override suspend fun getApiKeys(): List<String> = keys.toList()
+    override suspend fun getProviderKeys(): List<ProviderApiKey> =
+        keys.map { (provider, key) -> ProviderApiKey(provider = provider, key = key) }
 
-    override suspend fun getPrimaryApiKey(): String? = keys.firstOrNull()
+    override suspend fun getApiKey(provider: ModelProvider): String? = keys[provider]
 
-    override suspend fun addApiKey(key: String) {
-        keys.remove(key)
-        keys.add(0, key)
+    override suspend fun saveApiKey(provider: ModelProvider, key: String) {
+        keys[provider] = key
     }
 
-    override suspend fun removeApiKey(key: String) {
-        keys.remove(key)
+    override suspend fun clearApiKey(provider: ModelProvider) {
+        keys.remove(provider)
     }
 
-    override suspend fun getApiKey(): String? = getPrimaryApiKey()
-
-    override suspend fun saveApiKey(key: String) {
-        addApiKey(key)
-    }
-
-    override suspend fun clearApiKey() {
+    override suspend fun clearAllApiKeys() {
         keys.clear()
     }
 

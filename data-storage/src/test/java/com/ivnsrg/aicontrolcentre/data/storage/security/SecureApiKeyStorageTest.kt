@@ -1,6 +1,7 @@
 package com.ivnsrg.aicontrolcentre.data.storage.security
 
 import android.content.SharedPreferences
+import com.ivnsrg.aicontrolcentre.core.model.ModelProvider
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -10,12 +11,12 @@ class SecureApiKeyStorageTest {
     @Test
     fun `saved keys survive new storage instance`() {
         val prefs = FakeSharedPreferences()
-        SecureApiKeyStorage(prefs, testOnly = true).addApiKey("sk-or-v1-first")
+        SecureApiKeyStorage(prefs, testOnly = true).saveApiKey(ModelProvider.OPEN_ROUTER, "sk-or-v1-first")
 
         val reloaded = SecureApiKeyStorage(prefs, testOnly = true)
 
-        assertEquals(listOf("sk-or-v1-first"), reloaded.getApiKeys())
-        assertEquals("sk-or-v1-first", reloaded.getPrimaryApiKey())
+        assertEquals(listOf("sk-or-v1-first"), reloaded.getProviderKeys().map { it.key })
+        assertEquals("sk-or-v1-first", reloaded.getApiKey(ModelProvider.OPEN_ROUTER))
     }
 
     @Test
@@ -25,7 +26,7 @@ class SecureApiKeyStorageTest {
 
         val storage = SecureApiKeyStorage(prefs, testOnly = true)
 
-        assertEquals(listOf("legacy-key"), storage.getApiKeys())
+        assertEquals(listOf("legacy-key"), storage.getProviderKeys().map { it.key })
         assertNull(prefs.getString("openrouter_api_key", null))
     }
 }

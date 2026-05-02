@@ -70,7 +70,7 @@ fun AiControlCentreNavHost() {
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = backStackEntry?.destination
     val startDestination by produceState<String?>(initialValue = null) {
-        value = if (container.settingsRepository.getApiKey().isNullOrBlank()) {
+        value = if (!container.settingsRepository.hasAnyApiKeys()) {
             AppRoute.SETUP
         } else {
             AppRoute.PROJECTS
@@ -126,7 +126,7 @@ fun AiControlCentreNavHost() {
             ) {
                 SettingsRoute(
                     settingsRepository = container.settingsRepository,
-                    diagnosticsRepository = container.openRouterDiagnosticsRepository,
+                    providerQuotaRepository = container.providerQuotaRepository,
                     onApiKeyRemoved = {
                         navController.navigate(AppRoute.SETUP) {
                             popUpTo(navController.graph.id) {

@@ -25,6 +25,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.ivnsrg.aicontrolcentre.core.model.ModelProvider
 import com.ivnsrg.aicontrolcentre.core.model.ModelPickerMode
 import com.ivnsrg.aicontrolcentre.core.model.ModelCatalogEntry
 import com.ivnsrg.aicontrolcentre.core.model.ModelsRepository
@@ -77,7 +78,7 @@ class ModelPickerViewModel(
     fun refresh(forceRefresh: Boolean = false) {
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, error = UiError.None) }
-            if (settingsRepository.getApiKey().isNullOrBlank()) {
+            if (!settingsRepository.hasAnyApiKeys()) {
                 _uiState.update { it.copy(isLoading = false, error = UiError.MissingApiKey) }
                 return@launch
             }
@@ -202,7 +203,7 @@ fun ModelPickerScreen(
                     )
                 }
                 Text(
-                    text = "Choose OpenRouter model",
+                    text = "Choose provider model",
                     style = MaterialTheme.typography.headlineSmall,
                     color = colors.textPrimary,
                 )
@@ -245,7 +246,7 @@ fun ModelPickerScreen(
                 uiState.isLoading -> {
                     EmptyState(
                         title = "Loading models",
-                        subtitle = "Syncing model catalog from OpenRouter.",
+                        subtitle = "Syncing the provider model catalog.",
                         modifier = Modifier.weight(1f),
                     )
                 }
@@ -317,6 +318,10 @@ private fun ModelPickerItem(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                MetadataChip(
+                    text = providerLabel(model.provider),
+                    tone = BadgeTone.Info,
+                )
                 if (selected) {
                     Icon(
                         imageVector = Icons.Default.Check,
@@ -364,3 +369,5 @@ private fun List<ModelCatalogEntry>.filterForMode(mode: ModelPickerMode): List<M
             ModelPickerMode.COMPARE_A, ModelPickerMode.COMPARE_B -> model.supportsCompare
         }
     }
+
+private fun providerLabel(provider: ModelProvider): String = provider.displayName.uppercase()

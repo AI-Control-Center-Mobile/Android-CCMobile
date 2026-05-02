@@ -6,29 +6,39 @@ import com.ivnsrg.aicontrolcentre.core.model.ChatRepository
 import com.ivnsrg.aicontrolcentre.core.model.CompareRepository
 import com.ivnsrg.aicontrolcentre.core.model.CompareResultPayload
 import com.ivnsrg.aicontrolcentre.core.model.Message
-import com.ivnsrg.aicontrolcentre.core.model.MessageRole
 import com.ivnsrg.aicontrolcentre.core.model.ModelCatalogEntry
 import com.ivnsrg.aicontrolcentre.core.model.ModelProvider
 import com.ivnsrg.aicontrolcentre.core.model.ModelsRepository
 import com.ivnsrg.aicontrolcentre.core.model.OpenRouterDiagnosticsRepository
 import com.ivnsrg.aicontrolcentre.core.model.OpenRouterKeyDiagnostics
+import com.ivnsrg.aicontrolcentre.core.model.ProviderQuotaRepository
+import com.ivnsrg.aicontrolcentre.core.model.ProviderQuotaSnapshot
+import com.ivnsrg.aicontrolcentre.core.model.ProviderQuotaSource
+import com.ivnsrg.aicontrolcentre.core.model.ProviderQuotaStatus
+import com.ivnsrg.aicontrolcentre.core.model.ProviderQuotaValue
 import com.ivnsrg.aicontrolcentre.core.model.SettingsRepository
 import com.ivnsrg.aicontrolcentre.core.model.UiError
 import com.ivnsrg.aicontrolcentre.core.model.UiException
+import com.ivnsrg.aicontrolcentre.core.model.toReadableMessage
+import com.ivnsrg.aicontrolcentre.core.model.toUiError
+import com.ivnsrg.aicontrolcentre.data.network.api.OpenAiCompatibleService
 import com.ivnsrg.aicontrolcentre.data.network.api.OpenRouterNetworkFactory
 import com.ivnsrg.aicontrolcentre.data.network.api.OpenRouterService
-import com.ivnsrg.aicontrolcentre.data.network.dto.OpenRouterChatRequest
-import com.ivnsrg.aicontrolcentre.data.network.dto.OpenRouterChatResponse
-import com.ivnsrg.aicontrolcentre.data.network.dto.OpenRouterErrorResponse
-import com.ivnsrg.aicontrolcentre.data.network.dto.OpenRouterMessageDto
-import com.ivnsrg.aicontrolcentre.data.network.dto.OpenRouterStreamChunkDto
-import com.ivnsrg.aicontrolcentre.data.network.dto.OpenRouterUsageDto
+import com.ivnsrg.aicontrolcentre.data.network.api.SiliconFlowService
+import com.ivnsrg.aicontrolcentre.data.network.dto.OpenAiCompatibleChatRequest
+import com.ivnsrg.aicontrolcentre.data.network.dto.OpenAiCompatibleChatResponse
+import com.ivnsrg.aicontrolcentre.data.network.dto.OpenAiCompatibleErrorDto
+import com.ivnsrg.aicontrolcentre.data.network.dto.OpenAiCompatibleStreamChunkDto
+import com.ivnsrg.aicontrolcentre.data.network.mapper.buildOpenAiCompatibleMessages
+import com.ivnsrg.aicontrolcentre.data.network.mapper.extractProviderMessage
 import com.ivnsrg.aicontrolcentre.data.network.mapper.mapNetworkFailure
 import com.ivnsrg.aicontrolcentre.data.network.mapper.toAssistantMessageDraft
 import com.ivnsrg.aicontrolcentre.data.network.mapper.toDomain
+import com.ivnsrg.aicontrolcentre.data.network.mapper.toDomain as toOpenRouterDiagnostics
 import com.ivnsrg.aicontrolcentre.data.network.mapper.toEstimatedCost
 import com.ivnsrg.aicontrolcentre.data.storage.dao.ModelsDao
 import com.ivnsrg.aicontrolcentre.data.storage.entity.CachedModelEntity
+import com.ivnsrg.aicontrolcentre.data.storage.preferences.AppPreferencesStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -37,8 +47,6 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
@@ -49,83 +57,94 @@ import okhttp3.Response
 import java.io.IOException
 import kotlin.system.measureTimeMillis
 
-class OpenRouterModelsRepository(
+data class ProviderGatewayConfig(
+    val provider: ModelProvider,
+    val baseUrl: String,
+    val modelsService: OpenAiCompatibleService,
+)
+
+class UnifiedModelsRepository(
     private val modelsDao: ModelsDao,
-    private val service: OpenRouterService,
     private val settingsRepository: SettingsRepository,
+    gatewayConfigs: List<ProviderGatewayConfig>,
 ) : ModelsRepository {
-    private val refreshMutex = Mutex()
+    private val gateways = gatewayConfigs.associateBy { it.provider }
 
-    override suspend fun getCachedModels(): List<ModelCatalogEntry> =
-        modelsDao.getAll().map(CachedModelEntity::toDomainModel)
-
-    override suspend fun refreshModels(forceRefresh: Boolean): List<ModelCatalogEntry> {
-        if (!forceRefresh) {
-            getFreshCachedModels()?.let { return it }
-        }
-
-        return refreshMutex.withLock {
-            if (!forceRefresh) {
-                getFreshCachedModels()?.let { return@withLock it }
-            }
-            fetchRemoteModels()
-        }
+    override suspend fun getCachedModels(): List<ModelCatalogEntry> {
+        val configuredProviders = settingsRepository.getProviderKeys().mapTo(linkedSetOf()) { it.provider }
+        return modelsDao.getAll()
+            .filter { configuredProviders.isEmpty() || ModelProvider.valueOf(it.provider) in configuredProviders }
+            .map(CachedModelEntity::toDomainModel)
+            .sortedWith(compareBy<ModelCatalogEntry> { it.provider.displayName }.thenBy { it.label.lowercase() })
     }
 
-    private suspend fun fetchRemoteModels(): List<ModelCatalogEntry> {
-        val apiKeys = settingsRepository.getApiKeys().ifEmpty {
-            listOfNotNull(settingsRepository.getPrimaryApiKey())
-        }
-        if (apiKeys.isEmpty()) {
+    override suspend fun refreshModels(forceRefresh: Boolean): List<ModelCatalogEntry> {
+        val providerKeys = settingsRepository.getProviderKeys()
+        if (providerKeys.isEmpty()) {
             throw UiException(UiError.MissingApiKey)
         }
 
-        var lastFailure: OpenRouterExecutionException? = null
-        apiKeys.forEachIndexed { index, apiKey ->
-            try {
-                val models = service.getModels(apiKey.toBearerToken())
-                    .data
-                    .map { it.toDomain() }
-                    .sortedBy { it.label.lowercase() }
+        if (!forceRefresh) {
+            getFreshCachedModels(providerKeys.mapTo(linkedSetOf()) { it.provider })?.let { return it }
+        }
 
-                modelsDao.clear()
-                modelsDao.insertAll(
-                    models.map {
-                        CachedModelEntity(
-                            id = it.id,
-                            provider = it.provider.name,
-                            model = it.model,
-                            label = it.label,
-                            supportsChat = it.supportsChat,
-                            supportsCompare = it.supportsCompare,
-                            cachedAt = System.currentTimeMillis(),
-                        )
-                    },
-                )
-                settingsRepository.promoteSuccessfulFallback(index, apiKey)
-                return models
-            } catch (throwable: Throwable) {
-                val failure = throwable.toModelsExecutionException()
-                lastFailure = failure
-                if (!failure.shouldFailover || index == apiKeys.lastIndex) {
-                    throw failure.toUiException()
-                }
+        val cachedByProvider = modelsDao.getAll().groupBy { ModelProvider.valueOf(it.provider) }
+        val merged = mutableListOf<ModelCatalogEntry>()
+        var lastFailure: Throwable? = null
+
+        providerKeys.forEach { providerKey ->
+            val gateway = gateways[providerKey.provider]
+            if (gateway == null) {
+                lastFailure = UiException(UiError.Provider("Provider is not configured"))
+                return@forEach
+            }
+
+            runCatching {
+                gateway.modelsService.getModels(providerKey.key.toBearerToken())
+                    .data
+                    .map { it.toDomain(providerKey.provider) }
+            }.onSuccess { models ->
+                merged += models
+            }.onFailure { throwable ->
+                lastFailure = throwable
+                merged += cachedByProvider[providerKey.provider].orEmpty().map(CachedModelEntity::toDomainModel)
             }
         }
 
-        throw lastFailure?.toUiException() ?: UiException(UiError.MissingApiKey)
-    }
-
-    private suspend fun getFreshCachedModels(): List<ModelCatalogEntry>? {
-        val cached = modelsDao.getAll()
-        if (cached.isEmpty()) return null
-
-        val newestCachedAt = cached.maxOf { it.cachedAt }
-        if (System.currentTimeMillis() - newestCachedAt > MODELS_CACHE_FRESHNESS_MS) {
-            return null
+        if (merged.isEmpty()) {
+            throw mapNetworkFailure(lastFailure ?: IOException("No provider models available"))
         }
 
-        return cached.map(CachedModelEntity::toDomainModel)
+        modelsDao.clear()
+        modelsDao.insertAll(
+            merged.map {
+                CachedModelEntity(
+                    id = it.id,
+                    provider = it.provider.name,
+                    model = it.model,
+                    label = it.label,
+                    supportsChat = it.supportsChat,
+                    supportsCompare = it.supportsCompare,
+                    cachedAt = System.currentTimeMillis(),
+                )
+            },
+        )
+
+        return merged
+            .distinctBy { it.id }
+            .sortedWith(compareBy<ModelCatalogEntry> { it.provider.displayName }.thenBy { it.label.lowercase() })
+    }
+
+    private suspend fun getFreshCachedModels(
+        configuredProviders: Set<ModelProvider>,
+    ): List<ModelCatalogEntry>? {
+        val cached = modelsDao.getAll().filter { ModelProvider.valueOf(it.provider) in configuredProviders }
+        if (cached.isEmpty()) return null
+        if (!configuredProviders.all { provider -> cached.any { it.provider == provider.name } }) return null
+        if (cached.any { System.currentTimeMillis() - it.cachedAt > MODELS_CACHE_FRESHNESS_MS }) return null
+        return cached
+            .map(CachedModelEntity::toDomainModel)
+            .sortedWith(compareBy<ModelCatalogEntry> { it.provider.displayName }.thenBy { it.label.lowercase() })
     }
 }
 
@@ -134,130 +153,276 @@ class DefaultOpenRouterDiagnosticsRepository(
     private val settingsRepository: SettingsRepository,
 ) : OpenRouterDiagnosticsRepository {
     override suspend fun getCurrentKeyDiagnostics(): OpenRouterKeyDiagnostics {
-        val apiKeys = settingsRepository.getApiKeys().ifEmpty {
-            listOfNotNull(settingsRepository.getPrimaryApiKey())
-        }
-        if (apiKeys.isEmpty()) {
-            throw UiException(UiError.MissingApiKey)
-        }
-
-        var lastFailure: OpenRouterExecutionException? = null
-        apiKeys.forEachIndexed { index, apiKey ->
-            try {
-                val response = service.getCurrentKeyInfo(apiKey.toBearerToken())
-                val diagnostics = response.data?.toDomain()
-                    ?: throw OpenRouterExecutionException(
-                        uiError = UiError.Provider("OpenRouter не вернул данные по текущему API key"),
-                        shouldFailover = false,
-                    )
-                settingsRepository.promoteSuccessfulFallback(index, apiKey)
-                return diagnostics
-            } catch (throwable: Throwable) {
-                val failure = throwable.toModelsExecutionException()
-                lastFailure = failure
-                if (!failure.shouldFailover || index == apiKeys.lastIndex) {
-                    throw failure.toUiException()
-                }
-            }
-        }
-
-        throw lastFailure?.toUiException() ?: UiException(UiError.MissingApiKey)
+        val apiKey = settingsRepository.getApiKey(ModelProvider.OPEN_ROUTER)
+            ?: throw UiException(UiError.MissingApiKey)
+        val response = service.getCurrentKeyInfo(apiKey.toBearerToken())
+        return response.data?.toOpenRouterDiagnostics()
+            ?: throw UiException(UiError.Provider("OpenRouter did not return current key diagnostics"))
     }
 }
 
-class OpenRouterChatRepository internal constructor(
+class DefaultProviderQuotaRepository(
+    private val settingsRepository: SettingsRepository,
+    private val openRouterDiagnosticsRepository: OpenRouterDiagnosticsRepository,
+    private val siliconFlowService: SiliconFlowService,
+    private val appPreferencesStore: AppPreferencesStore,
+) : ProviderQuotaRepository {
+    override suspend fun getQuotaSnapshots(): List<ProviderQuotaSnapshot> = buildSnapshots(refreshRemote = false)
+
+    override suspend fun refreshQuotaSnapshots(): List<ProviderQuotaSnapshot> = buildSnapshots(refreshRemote = true)
+
+    override suspend fun recordRateLimitSnapshot(
+        provider: ModelProvider,
+        remainingRequests: String?,
+        remainingTokens: String?,
+        resetRequests: String?,
+        resetTokens: String?,
+    ) {
+        if (provider != ModelProvider.GROQ) return
+        appPreferencesStore.saveGroqRateLimitSnapshot(
+            remainingRequests = remainingRequests,
+            remainingTokens = remainingTokens,
+            resetRequests = resetRequests,
+            resetTokens = resetTokens,
+            updatedAt = System.currentTimeMillis(),
+        )
+    }
+
+    private suspend fun buildSnapshots(refreshRemote: Boolean): List<ProviderQuotaSnapshot> {
+        val configuredProviders = settingsRepository.getProviderKeys().mapTo(linkedSetOf()) { it.provider }
+        return configuredProviders.map { provider ->
+            when (provider) {
+                ModelProvider.OPEN_ROUTER -> loadOpenRouterSnapshot()
+                ModelProvider.SILICON_FLOW -> loadSiliconFlowSnapshot()
+                ModelProvider.GROQ -> loadGroqSnapshot()
+            }
+        }
+    }
+
+    private suspend fun loadOpenRouterSnapshot(): ProviderQuotaSnapshot =
+        runCatching { openRouterDiagnosticsRepository.getCurrentKeyDiagnostics() }
+            .map { diagnostics ->
+                ProviderQuotaSnapshot(
+                    provider = ModelProvider.OPEN_ROUTER,
+                    status = ProviderQuotaStatus.AVAILABLE,
+                    headline = if (diagnostics.isFreeTier) "OpenRouter free-tier limits" else "OpenRouter usage",
+                    values = buildList {
+                        diagnostics.limitRemaining?.let {
+                            add(ProviderQuotaValue("Remaining", formatQuotaValue(it)))
+                        }
+                        add(ProviderQuotaValue("Daily usage", formatQuotaValue(diagnostics.usageDaily)))
+                        diagnostics.limitReset?.takeIf { it.isNotBlank() }?.let {
+                            add(ProviderQuotaValue("Reset", it))
+                        }
+                    },
+                    detail = diagnostics.label?.let { "Key: $it" },
+                    updatedAt = System.currentTimeMillis(),
+                    source = ProviderQuotaSource.LIVE,
+                )
+            }.getOrElse { throwable ->
+                ProviderQuotaSnapshot(
+                    provider = ModelProvider.OPEN_ROUTER,
+                    status = ProviderQuotaStatus.ERROR,
+                    headline = "OpenRouter diagnostics unavailable",
+                    detail = throwable.toUiError().toReadableMessage(),
+                    updatedAt = System.currentTimeMillis(),
+                    source = ProviderQuotaSource.LIVE,
+                )
+            }
+
+    private suspend fun loadSiliconFlowSnapshot(): ProviderQuotaSnapshot {
+        val apiKey = settingsRepository.getApiKey(ModelProvider.SILICON_FLOW)
+            ?: return ProviderQuotaSnapshot(
+                provider = ModelProvider.SILICON_FLOW,
+                status = ProviderQuotaStatus.UNAVAILABLE,
+                headline = "SiliconFlow key missing",
+                detail = "Add a provider key to load balance information.",
+            )
+
+        return runCatching { siliconFlowService.getUserInfo(apiKey.toBearerToken()) }
+            .map { response ->
+                val data = response.data
+                ProviderQuotaSnapshot(
+                    provider = ModelProvider.SILICON_FLOW,
+                    status = if (response.status && data != null) ProviderQuotaStatus.AVAILABLE else ProviderQuotaStatus.ERROR,
+                    headline = "SiliconFlow balance",
+                    values = buildList {
+                        data?.balance?.let { add(ProviderQuotaValue("Balance", it)) }
+                        data?.chargeBalance?.let { add(ProviderQuotaValue("Charge balance", it)) }
+                        data?.totalBalance?.let { add(ProviderQuotaValue("Total balance", it)) }
+                    },
+                    detail = data?.status ?: response.message,
+                    updatedAt = System.currentTimeMillis(),
+                    source = ProviderQuotaSource.LIVE,
+                )
+            }.getOrElse { throwable ->
+                ProviderQuotaSnapshot(
+                    provider = ModelProvider.SILICON_FLOW,
+                    status = ProviderQuotaStatus.ERROR,
+                    headline = "SiliconFlow balance unavailable",
+                    detail = throwable.toUiError().toReadableMessage(),
+                    updatedAt = System.currentTimeMillis(),
+                    source = ProviderQuotaSource.LIVE,
+                )
+            }
+    }
+
+    private suspend fun loadGroqSnapshot(): ProviderQuotaSnapshot {
+        val snapshot = appPreferencesStore.getGroqRateLimitSnapshot()
+        if (snapshot == null) {
+            return ProviderQuotaSnapshot(
+                provider = ModelProvider.GROQ,
+                status = ProviderQuotaStatus.UNAVAILABLE,
+                headline = "No Groq quota snapshot yet",
+                detail = "Run at least one successful Groq request to capture the latest rate-limit headers.",
+                source = ProviderQuotaSource.SNAPSHOT,
+            )
+        }
+
+        return ProviderQuotaSnapshot(
+            provider = ModelProvider.GROQ,
+            status = ProviderQuotaStatus.AVAILABLE,
+            headline = "Last known Groq rate limits",
+            values = buildList {
+                snapshot.remainingRequests?.let { add(ProviderQuotaValue("Remaining requests", it)) }
+                snapshot.remainingTokens?.let { add(ProviderQuotaValue("Remaining tokens", it)) }
+                snapshot.resetRequests?.let { add(ProviderQuotaValue("Reset requests", it)) }
+                snapshot.resetTokens?.let { add(ProviderQuotaValue("Reset tokens", it)) }
+            },
+            detail = "Captured from response headers.",
+            updatedAt = snapshot.updatedAt,
+            source = ProviderQuotaSource.SNAPSHOT,
+        )
+    }
+}
+
+class UnifiedChatRepository(
     httpClient: OkHttpClient,
     json: Json,
     settingsRepository: SettingsRepository,
-    baseUrl: String = OPEN_ROUTER_CHAT_COMPLETIONS_URL,
+    gatewayConfigs: List<ProviderGatewayConfig>,
+    quotaRepository: ProviderQuotaRepository? = null,
 ) : ChatRepository {
-    private val completionExecutor = OpenRouterCompletionExecutor(
-        httpClient = httpClient,
-        json = json,
-        settingsRepository = settingsRepository,
-        baseUrl = baseUrl,
-    )
+    private val clients = gatewayConfigs.associate { config ->
+        config.provider to OpenAiCompatibleClient(
+            provider = config.provider,
+            httpClient = httpClient,
+            json = json,
+            settingsRepository = settingsRepository,
+            baseUrl = config.baseUrl,
+            quotaRepository = quotaRepository,
+        )
+    }
 
     override suspend fun sendMessage(
         threadId: Long,
+        provider: ModelProvider,
         modelId: String,
         prompt: String,
         history: List<Message>,
-    ): AssistantMessageDraft = completionExecutor.createCompletion(modelId, prompt, history)
+    ): AssistantMessageDraft = requireClient(provider).createCompletion(modelId, prompt, history)
 
     override fun streamMessage(
         threadId: Long,
+        provider: ModelProvider,
         modelId: String,
         prompt: String,
         history: List<Message>,
-    ): Flow<AssistantStreamEvent> = completionExecutor.streamCompletion(modelId, prompt, history)
+    ): Flow<AssistantStreamEvent> = requireClient(provider).streamCompletion(modelId, prompt, history)
+
+    private fun requireClient(provider: ModelProvider): OpenAiCompatibleClient =
+        clients[provider] ?: throw UiException(UiError.Provider("Provider is not configured"))
 }
 
-class OpenRouterCompareRepository internal constructor(
+class UnifiedCompareRepository(
     httpClient: OkHttpClient,
     json: Json,
     settingsRepository: SettingsRepository,
-    baseUrl: String = OPEN_ROUTER_CHAT_COMPLETIONS_URL,
+    gatewayConfigs: List<ProviderGatewayConfig>,
+    quotaRepository: ProviderQuotaRepository? = null,
 ) : CompareRepository {
-    private val completionExecutor = OpenRouterCompletionExecutor(
-        httpClient = httpClient,
-        json = json,
-        settingsRepository = settingsRepository,
-        baseUrl = baseUrl,
-    )
+    private val clients = gatewayConfigs.associate { config ->
+        config.provider to OpenAiCompatibleClient(
+            provider = config.provider,
+            httpClient = httpClient,
+            json = json,
+            settingsRepository = settingsRepository,
+            baseUrl = config.baseUrl,
+            quotaRepository = quotaRepository,
+        )
+    }
 
     override suspend fun compare(
         threadId: Long,
+        providerA: ModelProvider,
         modelA: String,
+        providerB: ModelProvider,
         modelB: String,
         prompt: String,
         history: List<Message>,
     ): CompareResultPayload = coroutineScope {
-        val first = async { completionExecutor.createCompletion(modelA, prompt, history) }
-        val second = async { completionExecutor.createCompletion(modelB, prompt, history) }
+        val first = async { requireClient(providerA).createCompletion(modelA, prompt, history) }
+        val second = async { requireClient(providerB).createCompletion(modelB, prompt, history) }
         val drafts = awaitAll(first, second)
-        CompareResultPayload(
-            first = drafts[0],
-            second = drafts[1],
-        )
+        CompareResultPayload(first = drafts[0], second = drafts[1])
     }
 
     override fun streamModelResponse(
         threadId: Long,
+        provider: ModelProvider,
         modelId: String,
         prompt: String,
         history: List<Message>,
-    ): Flow<AssistantStreamEvent> = completionExecutor.streamCompletion(modelId, prompt, history)
+    ): Flow<AssistantStreamEvent> = requireClient(provider).streamCompletion(modelId, prompt, history)
+
+    private fun requireClient(provider: ModelProvider): OpenAiCompatibleClient =
+        clients[provider] ?: throw UiException(UiError.Provider("Provider is not configured"))
 }
 
-private class OpenRouterCompletionExecutor(
+private class OpenAiCompatibleClient(
+    private val provider: ModelProvider,
     private val httpClient: OkHttpClient,
     private val json: Json,
     private val settingsRepository: SettingsRepository,
-    private val baseUrl: String,
+    baseUrl: String,
+    private val quotaRepository: ProviderQuotaRepository? = null,
 ) {
+    private val chatCompletionsUrl = baseUrl.ensureTrailingSlash() + "chat/completions"
+
     suspend fun createCompletion(
         modelId: String,
         prompt: String,
         history: List<Message>,
-    ): AssistantMessageDraft {
-        val apiKeys = requireApiKeys()
-        var lastFailure: OpenRouterExecutionException? = null
+    ): AssistantMessageDraft = withContext(Dispatchers.IO) {
+        val apiKey = requireApiKey()
+        val request = buildRequest(
+            authorization = apiKey.toBearerToken(),
+            payload = OpenAiCompatibleChatRequest(
+                model = modelId,
+                messages = buildOpenAiCompatibleMessages(history = history, prompt = prompt),
+            ),
+        )
 
-        apiKeys.forEachIndexed { index, apiKey ->
-            try {
-                val draft = executeCompletion(apiKey, modelId, prompt, history)
-                settingsRepository.promoteSuccessfulFallback(index, apiKey)
-                return draft
-            } catch (failure: OpenRouterExecutionException) {
-                lastFailure = failure
-                if (!failure.shouldFailover || index == apiKeys.lastIndex) {
-                    throw failure.toUiException()
+        var responseModel: OpenAiCompatibleChatResponse? = null
+        val latencyMs = measureTimeMillis {
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    throw response.toExecutionException(json, provider, modelId)
                 }
+                quotaRepository?.recordRateLimitSnapshot(
+                    provider = provider,
+                    remainingRequests = response.header("x-ratelimit-remaining-requests"),
+                    remainingTokens = response.header("x-ratelimit-remaining-tokens"),
+                    resetRequests = response.header("x-ratelimit-reset-requests"),
+                    resetTokens = response.header("x-ratelimit-reset-tokens"),
+                )
+                val body = response.body?.string().orEmpty()
+                responseModel = json.decodeFromString(OpenAiCompatibleChatResponse.serializer(), body)
             }
         }
 
-        throw lastFailure?.toUiException() ?: UiException(UiError.MissingApiKey)
+        responseModel?.toAssistantMessageDraft(provider, modelId, latencyMs)
+            ?: throw ProviderExecutionException(UiError.Provider("Provider returned an empty response"))
     }
 
     fun streamCompletion(
@@ -265,57 +430,10 @@ private class OpenRouterCompletionExecutor(
         prompt: String,
         history: List<Message>,
     ): Flow<AssistantStreamEvent> = flow {
-        val apiKeys = requireApiKeys()
-        var lastFailure: OpenRouterExecutionException? = null
-
-        apiKeys.forEachIndexed { index, apiKey ->
-            try {
-                emit(AssistantStreamEvent.Streaming(accumulatedContent = "", isProcessing = true))
-                streamCompletionAttempt(apiKey, modelId, prompt, history).collect { emit(it) }
-                settingsRepository.promoteSuccessfulFallback(index, apiKey)
-                return@flow
-            } catch (failure: OpenRouterExecutionException) {
-                lastFailure = failure
-                if (!failure.shouldFailover || index == apiKeys.lastIndex) {
-                    throw failure.toUiException()
-                }
-            }
-        }
-
-        throw lastFailure?.toUiException() ?: UiException(UiError.MissingApiKey)
-    }
-
-    private suspend fun executeCompletion(
-        apiKey: String,
-        modelId: String,
-        prompt: String,
-        history: List<Message>,
-    ): AssistantMessageDraft = withContext(Dispatchers.IO) {
-        val request = buildRequest(
-            authorization = apiKey.toBearerToken(),
-            payload = OpenRouterChatRequest(
-                model = modelId,
-                messages = buildOpenRouterMessages(history = history, prompt = prompt),
-            ),
-        )
-
-        var responseModel: OpenRouterChatResponse? = null
-        val latencyMs = measureTimeMillis {
-            httpClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    throw response.toExecutionException(json, modelId)
-                }
-                val body = response.body?.string().orEmpty()
-                responseModel = json.decodeFromString(OpenRouterChatResponse.serializer(), body)
-            }
-        }
-
-        responseModel?.toAssistantMessageDraft(modelId, latencyMs)
-            ?: throw OpenRouterExecutionException(
-                uiError = UiError.Provider("Провайдер вернул пустой ответ"),
-                shouldFailover = false,
-            )
-    }
+        val apiKey = requireApiKey()
+        emit(AssistantStreamEvent.Streaming(accumulatedContent = "", isProcessing = true))
+        streamCompletionAttempt(apiKey, modelId, prompt, history).collect { emit(it) }
+    }.flowOn(Dispatchers.IO)
 
     private fun streamCompletionAttempt(
         apiKey: String,
@@ -325,9 +443,9 @@ private class OpenRouterCompletionExecutor(
     ): Flow<AssistantStreamEvent> = flow {
         val request = buildRequest(
             authorization = apiKey.toBearerToken(),
-            payload = OpenRouterChatRequest(
+            payload = OpenAiCompatibleChatRequest(
                 model = modelId,
-                messages = buildOpenRouterMessages(history = history, prompt = prompt),
+                messages = buildOpenAiCompatibleMessages(history = history, prompt = prompt),
                 stream = true,
             ),
         )
@@ -335,16 +453,20 @@ private class OpenRouterCompletionExecutor(
         val startTime = System.currentTimeMillis()
         httpClient.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
-                throw response.toExecutionException(json, modelId)
+                throw response.toExecutionException(json, provider, modelId)
             }
+            quotaRepository?.recordRateLimitSnapshot(
+                provider = provider,
+                remainingRequests = response.header("x-ratelimit-remaining-requests"),
+                remainingTokens = response.header("x-ratelimit-remaining-tokens"),
+                resetRequests = response.header("x-ratelimit-reset-requests"),
+                resetTokens = response.header("x-ratelimit-reset-tokens"),
+            )
 
             val source = response.body?.source()
-                ?: throw OpenRouterExecutionException(
-                    uiError = UiError.Provider("Провайдер вернул пустой stream"),
-                    shouldFailover = false,
-                )
+                ?: throw ProviderExecutionException(UiError.Provider("Provider returned an empty stream"))
 
-            val state = StreamingAccumulator(modelId = modelId)
+            val state = StreamingAccumulator(provider = provider, modelId = modelId)
             val pendingLines = mutableListOf<String>()
 
             while (!source.exhausted()) {
@@ -363,41 +485,25 @@ private class OpenRouterCompletionExecutor(
             }
 
             if (!state.isDone) {
-                throw OpenRouterExecutionException(
-                    uiError = UiError.Network("OpenRouter закрыл stream до завершения ответа"),
-                    shouldFailover = false,
+                throw ProviderExecutionException(
+                    UiError.Network("${provider.displayName} closed the stream before the response completed"),
                 )
             }
 
-            emit(
-                AssistantStreamEvent.Completed(
-                    draft = state.buildDraft(
-                        latencyMs = System.currentTimeMillis() - startTime,
-                    ),
-                ),
-            )
+            emit(AssistantStreamEvent.Completed(draft = state.buildDraft(System.currentTimeMillis() - startTime)))
         }
-    }.flowOn(Dispatchers.IO)
-
-    private suspend fun requireApiKeys(): List<String> {
-        val apiKeys = settingsRepository.getApiKeys().ifEmpty {
-            listOfNotNull(settingsRepository.getPrimaryApiKey())
-        }
-        if (apiKeys.isEmpty()) {
-            throw UiException(UiError.MissingApiKey)
-        }
-        return apiKeys
     }
+
+    private suspend fun requireApiKey(): String =
+        settingsRepository.getApiKey(provider) ?: throw UiException(UiError.MissingApiKey)
 
     private fun buildRequest(
         authorization: String,
-        payload: OpenRouterChatRequest,
+        payload: OpenAiCompatibleChatRequest,
     ): Request {
-        val body = json.encodeToString(payload)
-            .toRequestBody(JSON_MEDIA_TYPE)
-
+        val body = json.encodeToString(payload).toRequestBody(JSON_MEDIA_TYPE)
         return Request.Builder()
-            .url(baseUrl)
+            .url(chatCompletionsUrl)
             .header("Authorization", authorization)
             .header("Content-Type", JSON_MEDIA_TYPE.toString())
             .post(body)
@@ -405,42 +511,13 @@ private class OpenRouterCompletionExecutor(
     }
 }
 
-internal fun buildOpenRouterMessages(
-    history: List<Message>,
-    prompt: String,
-): List<OpenRouterMessageDto> {
-    val trimmedPrompt = prompt.trim()
-    val messages = history
-        .filter { it.content.isNotBlank() }
-        .map { message ->
-            OpenRouterMessageDto(
-                role = when (message.role) {
-                    MessageRole.USER -> "user"
-                    MessageRole.ASSISTANT -> "assistant"
-                },
-                content = message.content,
-            )
-        }
-        .toMutableList()
-
-    val latestUserPrompt = history
-        .asReversed()
-        .firstOrNull { it.role == MessageRole.USER }
-        ?.content
-        ?.trim()
-
-    if (trimmedPrompt.isNotBlank() && latestUserPrompt != trimmedPrompt) {
-        messages += OpenRouterMessageDto(role = "user", content = trimmedPrompt)
-    }
-
-    return messages
-}
-
 private class StreamingAccumulator(
+    private val provider: ModelProvider,
     private val modelId: String,
 ) {
     private val content = StringBuilder()
-    private var usage: OpenRouterUsageDto? = null
+    private val reasoning = StringBuilder()
+    private var usage: com.ivnsrg.aicontrolcentre.data.network.dto.OpenAiCompatibleUsageDto? = null
     private var finalModel: String? = null
     var isDone: Boolean = false
         private set
@@ -460,9 +537,7 @@ private class StreamingAccumulator(
                     )
                 }
 
-                line.startsWith("data:") -> {
-                    dataLines += line.removePrefix("data:").trimStart()
-                }
+                line.startsWith("data:") -> dataLines += line.removePrefix("data:").trimStart()
             }
         }
 
@@ -474,11 +549,10 @@ private class StreamingAccumulator(
         }
 
         val chunk = runCatching {
-            json.decodeFromString(OpenRouterStreamChunkDto.serializer(), payload)
+            json.decodeFromString(OpenAiCompatibleStreamChunkDto.serializer(), payload)
         }.getOrElse { throwable ->
-            throw OpenRouterExecutionException(
-                uiError = UiError.Unknown(throwable.message ?: "Не удалось разобрать streaming-ответ"),
-                shouldFailover = false,
+            throw ProviderExecutionException(
+                uiError = UiError.Unknown(throwable.message ?: "Failed to parse streaming response"),
                 cause = throwable,
             )
         }
@@ -487,9 +561,17 @@ private class StreamingAccumulator(
         usage = chunk.usage ?: usage
 
         chunk.error?.message?.takeIf { it.isNotBlank() }?.let { message ->
-            throw OpenRouterExecutionException(
-                uiError = chunk.error.toStreamUiError(message, modelId),
-                shouldFailover = false,
+            throw ProviderExecutionException(
+                uiError = chunk.error.toStreamUiError(provider, message, modelId),
+            )
+        }
+
+        val reasoningDelta = chunk.choices.firstOrNull()?.delta?.reasoningContent.orEmpty()
+        if (reasoningDelta.isNotEmpty()) {
+            reasoning.append(reasoningDelta)
+            return AssistantStreamEvent.Streaming(
+                accumulatedContent = combinedContent(),
+                isProcessing = false,
             )
         }
 
@@ -497,7 +579,7 @@ private class StreamingAccumulator(
         if (delta.isNotEmpty()) {
             content.append(delta)
             return AssistantStreamEvent.Streaming(
-                accumulatedContent = content.toString(),
+                accumulatedContent = combinedContent(),
                 isProcessing = false,
             )
         }
@@ -508,37 +590,43 @@ private class StreamingAccumulator(
         }
 
         return AssistantStreamEvent.Streaming(
-            accumulatedContent = content.toString(),
+            accumulatedContent = combinedContent(),
             isProcessing = content.isEmpty(),
         )
     }
 
     fun buildDraft(latencyMs: Long): AssistantMessageDraft {
-        val finalContent = content.toString().trim()
+        val finalContent = combinedContent().trim()
         if (finalContent.isBlank()) {
-            throw OpenRouterExecutionException(
-                uiError = UiError.Provider("Провайдер вернул пустой ответ"),
-                shouldFailover = false,
-            )
+            throw ProviderExecutionException(UiError.Provider("Provider returned an empty response"))
         }
         return AssistantMessageDraft(
             content = finalContent,
-            provider = ModelProvider.OPEN_ROUTER,
+            provider = provider,
             model = finalModel ?: modelId,
             latencyMs = latencyMs,
             estimatedCost = usage.toEstimatedCost(),
         )
     }
+
+    private fun combinedContent(): String {
+        val reasoningText = reasoning.toString().trim()
+        val answerText = content.toString()
+        return when {
+            reasoningText.isBlank() -> answerText
+            answerText.isBlank() -> "<think>$reasoningText</think>"
+            else -> "<think>$reasoningText</think>\n\n$answerText"
+        }
+    }
 }
 
-private class OpenRouterExecutionException(
+private class ProviderExecutionException(
     val uiError: UiError,
-    val shouldFailover: Boolean,
     cause: Throwable? = null,
 ) : RuntimeException(
     when (uiError) {
-        UiError.None -> "Unknown OpenRouter failure"
-        UiError.MissingApiKey -> "Missing OpenRouter API key"
+        UiError.None -> "Unknown provider failure"
+        UiError.MissingApiKey -> "Missing provider API key"
         is UiError.Network -> uiError.message
         is UiError.Provider -> uiError.message
         is UiError.Unknown -> uiError.message
@@ -549,96 +637,57 @@ private class OpenRouterExecutionException(
     fun toUiException(): UiException = UiException(uiError, this)
 }
 
-private suspend fun SettingsRepository.promoteSuccessfulFallback(index: Int, apiKey: String) {
-    if (index == 0) return
-    runCatching {
-        addApiKey(apiKey)
-    }
-}
-
 private fun Response.toExecutionException(
     json: Json,
+    provider: ModelProvider,
     modelId: String? = null,
-): OpenRouterExecutionException {
+): ProviderExecutionException {
     val code = code
     val rawBody = runCatching { body?.string().orEmpty() }.getOrDefault("")
     val providerMessage = rawBody.extractProviderMessage(json)
 
     return when (code) {
-        400, 422 -> OpenRouterExecutionException(
-            uiError = UiError.Provider(providerMessage ?: "Провайдер вернул ошибку $code"),
-            shouldFailover = false,
+        400, 422 -> ProviderExecutionException(
+            uiError = UiError.Provider(providerMessage ?: "${provider.displayName} rejected the request ($code)"),
         )
 
-        401 -> OpenRouterExecutionException(
+        401, 403 -> ProviderExecutionException(
             uiError = UiError.MissingApiKey,
-            shouldFailover = true,
         )
 
-        402 -> OpenRouterExecutionException(
-            uiError = UiError.Provider(providerMessage ?: "У текущего OpenRouter API key закончились credits"),
-            shouldFailover = true,
+        429 -> ProviderExecutionException(
+            uiError = UiError.Network(rateLimitMessage(provider, providerMessage, modelId, code)),
         )
 
-        403 -> OpenRouterExecutionException(
-            uiError = UiError.Provider(providerMessage ?: "Провайдер отклонил запрос"),
-            shouldFailover = false,
+        408, 500, 502, 503 -> ProviderExecutionException(
+            uiError = UiError.Network(providerMessage ?: "${provider.displayName} is temporarily unavailable ($code)"),
         )
 
-        429 -> OpenRouterExecutionException(
-            uiError = UiError.Network(rateLimitMessage(providerMessage, modelId, code)),
-            shouldFailover = false,
-        )
-
-        408, 500, 502, 503 -> OpenRouterExecutionException(
-            uiError = UiError.Network(providerMessage ?: "Сервис OpenRouter временно недоступен ($code)"),
-            shouldFailover = false,
-        )
-
-        else -> OpenRouterExecutionException(
-            uiError = UiError.Provider(providerMessage ?: "Провайдер вернул ошибку $code"),
-            shouldFailover = false,
+        else -> ProviderExecutionException(
+            uiError = UiError.Provider(providerMessage ?: "${provider.displayName} returned an error ($code)"),
         )
     }
 }
 
-private fun Throwable.toModelsExecutionException(): OpenRouterExecutionException =
+private fun Throwable.toProviderExecutionException(): ProviderExecutionException =
     when (val ui = mapNetworkFailure(this).error) {
-        UiError.MissingApiKey -> OpenRouterExecutionException(ui, shouldFailover = true, cause = this)
-        is UiError.Network -> OpenRouterExecutionException(
-            ui,
-            shouldFailover = false,
-            cause = this,
-        )
-        is UiError.Provider -> OpenRouterExecutionException(
-            ui,
-            shouldFailover = ui.message.contains("credits", ignoreCase = true),
-            cause = this,
-        )
-        is UiError.Unknown -> OpenRouterExecutionException(ui, shouldFailover = false, cause = this)
-        is UiError.Validation -> OpenRouterExecutionException(ui, shouldFailover = false, cause = this)
-        UiError.None -> OpenRouterExecutionException(UiError.Unknown("Unknown error"), shouldFailover = false, cause = this)
+        UiError.MissingApiKey -> ProviderExecutionException(ui, cause = this)
+        is UiError.Network -> ProviderExecutionException(ui, cause = this)
+        is UiError.Provider -> ProviderExecutionException(ui, cause = this)
+        is UiError.Unknown -> ProviderExecutionException(ui, cause = this)
+        is UiError.Validation -> ProviderExecutionException(ui, cause = this)
+        UiError.None -> ProviderExecutionException(UiError.Unknown("Unknown error"), cause = this)
     }
 
-private fun String.extractProviderMessage(json: Json): String? =
-    takeIf { it.isNotBlank() }
-        ?.let {
-            runCatching { json.decodeFromString(OpenRouterErrorResponse.serializer(), it) }
-                .getOrNull()
-                ?.error
-                ?.message
-                ?.trim()
-        }
-        ?.takeIf { it.isNotBlank() }
-
-private fun com.ivnsrg.aicontrolcentre.data.network.dto.OpenRouterErrorDto.toStreamUiError(
+private fun OpenAiCompatibleErrorDto.toStreamUiError(
+    provider: ModelProvider,
     fallbackMessage: String,
     modelId: String? = null,
 ): UiError {
     val normalizedCode = code.orEmpty().lowercase()
     return when {
         "rate" in normalizedCode ->
-            UiError.Network(rateLimitMessage(message ?: fallbackMessage, modelId, null))
+            UiError.Network(rateLimitMessage(provider, message ?: fallbackMessage, modelId, null))
 
         "timeout" in normalizedCode || "server" in normalizedCode || "provider" in normalizedCode ->
             UiError.Network(message ?: fallbackMessage)
@@ -648,14 +697,15 @@ private fun com.ivnsrg.aicontrolcentre.data.network.dto.OpenRouterErrorDto.toStr
 }
 
 private fun rateLimitMessage(
+    provider: ModelProvider,
     providerMessage: String?,
     modelId: String?,
     code: Int?,
 ): String {
     val baseMessage = providerMessage?.takeIf { it.isNotBlank() }
-        ?: "Сервис OpenRouter временно недоступен (${code ?: 429})"
-    return if (modelId.isFreeVariant()) {
-        "$baseMessage. Выбрана free-модель: у OpenRouter для :free действуют более жёсткие лимиты, включая 20 запросов в минуту и низкий дневной лимит. Попробуй позже, выбери модель без :free или добавь credits."
+        ?: "${provider.displayName} is temporarily unavailable (${code ?: 429})"
+    return if (provider == ModelProvider.OPEN_ROUTER && modelId.isFreeVariant()) {
+        "$baseMessage. The selected model is a free variant, which has stricter OpenRouter rate limits."
     } else {
         baseMessage
     }
@@ -664,10 +714,6 @@ private fun rateLimitMessage(
 private fun String?.isFreeVariant(): Boolean = this?.endsWith(":free", ignoreCase = true) == true
 
 private fun String.toBearerToken(): String = "Bearer $this"
-
-private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
-private const val OPEN_ROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions"
-private const val MODELS_CACHE_FRESHNESS_MS = 6 * 60 * 60 * 1000L
 
 private fun CachedModelEntity.toDomainModel(): ModelCatalogEntry = ModelCatalogEntry(
     id = id,
@@ -678,21 +724,17 @@ private fun CachedModelEntity.toDomainModel(): ModelCatalogEntry = ModelCatalogE
     supportsCompare = supportsCompare,
 )
 
-fun createOpenRouterChatRepository(
-    settingsRepository: SettingsRepository,
-): ChatRepository = OpenRouterChatRepository(
-    httpClient = OpenRouterNetworkFactory.createOkHttpClient(),
-    json = OpenRouterNetworkFactory.createJson(),
-    settingsRepository = settingsRepository,
-)
+private fun String.ensureTrailingSlash(): String =
+    if (endsWith("/")) this else "$this/"
 
-fun createOpenRouterCompareRepository(
-    settingsRepository: SettingsRepository,
-): CompareRepository = OpenRouterCompareRepository(
-    httpClient = OpenRouterNetworkFactory.createOkHttpClient(),
-    json = OpenRouterNetworkFactory.createJson(),
-    settingsRepository = settingsRepository,
-)
+private fun formatQuotaValue(value: Double): String =
+    if (value % 1.0 == 0.0) value.toInt().toString() else String.format("%.2f", value)
+
+private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+private const val MODELS_CACHE_FRESHNESS_MS = 6 * 60 * 60 * 1000L
+private const val OPEN_ROUTER_BASE_URL = "https://openrouter.ai/api/v1/"
+private const val GROQ_BASE_URL = "https://api.groq.com/openai/v1/"
+private const val SILICON_FLOW_BASE_URL = "https://api.siliconflow.com/v1/"
 
 fun createOpenRouterDiagnosticsRepository(
     service: OpenRouterService,
@@ -701,3 +743,82 @@ fun createOpenRouterDiagnosticsRepository(
     service = service,
     settingsRepository = settingsRepository,
 )
+
+fun createOpenRouterDiagnosticsRepository(
+    settingsRepository: SettingsRepository,
+): OpenRouterDiagnosticsRepository = DefaultOpenRouterDiagnosticsRepository(
+    service = OpenRouterNetworkFactory.createOpenRouterService(),
+    settingsRepository = settingsRepository,
+)
+
+fun createUnifiedModelsRepository(
+    modelsDao: ModelsDao,
+    settingsRepository: SettingsRepository,
+): ModelsRepository = UnifiedModelsRepository(
+    modelsDao = modelsDao,
+    settingsRepository = settingsRepository,
+    gatewayConfigs = defaultProviderGatewayConfigs(),
+)
+
+fun createUnifiedChatRepository(
+    settingsRepository: SettingsRepository,
+    providerQuotaRepository: ProviderQuotaRepository? = null,
+): ChatRepository = UnifiedChatRepository(
+    httpClient = OpenRouterNetworkFactory.createOkHttpClient(),
+    json = OpenRouterNetworkFactory.createJson(),
+    settingsRepository = settingsRepository,
+    gatewayConfigs = defaultProviderGatewayConfigs(),
+    quotaRepository = providerQuotaRepository,
+)
+
+fun createUnifiedCompareRepository(
+    settingsRepository: SettingsRepository,
+    providerQuotaRepository: ProviderQuotaRepository? = null,
+): CompareRepository = UnifiedCompareRepository(
+    httpClient = OpenRouterNetworkFactory.createOkHttpClient(),
+    json = OpenRouterNetworkFactory.createJson(),
+    settingsRepository = settingsRepository,
+    gatewayConfigs = defaultProviderGatewayConfigs(),
+    quotaRepository = providerQuotaRepository,
+)
+
+fun createProviderQuotaRepository(
+    settingsRepository: SettingsRepository,
+    appPreferencesStore: AppPreferencesStore,
+    openRouterDiagnosticsRepository: OpenRouterDiagnosticsRepository,
+): ProviderQuotaRepository = DefaultProviderQuotaRepository(
+    settingsRepository = settingsRepository,
+    openRouterDiagnosticsRepository = openRouterDiagnosticsRepository,
+    siliconFlowService = OpenRouterNetworkFactory.createSiliconFlowService(),
+    appPreferencesStore = appPreferencesStore,
+)
+
+private fun defaultProviderGatewayConfigs(): List<ProviderGatewayConfig> {
+    val client = OpenRouterNetworkFactory.createOkHttpClient()
+    return listOf(
+        ProviderGatewayConfig(
+            provider = ModelProvider.OPEN_ROUTER,
+            baseUrl = OPEN_ROUTER_BASE_URL,
+            modelsService = OpenRouterNetworkFactory.createOpenAiCompatibleService(
+                baseUrl = OPEN_ROUTER_BASE_URL,
+                client = client,
+            ),
+        ),
+        ProviderGatewayConfig(
+            provider = ModelProvider.GROQ,
+            baseUrl = GROQ_BASE_URL,
+            modelsService = OpenRouterNetworkFactory.createOpenAiCompatibleService(
+                baseUrl = GROQ_BASE_URL,
+                client = client,
+            ),
+        ),
+        ProviderGatewayConfig(
+            provider = ModelProvider.SILICON_FLOW,
+            baseUrl = SILICON_FLOW_BASE_URL,
+            modelsService = OpenRouterNetworkFactory.createOpenAiCompatibleService(
+                baseUrl = SILICON_FLOW_BASE_URL,
+                client = client,
+            ),
+        ),
+    )
+}
