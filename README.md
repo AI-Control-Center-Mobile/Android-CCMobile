@@ -5,8 +5,7 @@
 Текущая кодовая база поддерживает `OpenRouter`, `Groq` и `SiliconFlow`, потоковый чат, выбор модели, compare двух моделей в рамках одного треда и просмотр квот/диагностики по настроенным провайдерам.
 
 ## Демо
-
-- [Screen recording demo](docs/Screen_recording_20260430_135651.mp4)
+[Screen recording demo](docs/screenshots/Screen_recording_20260502_200433.gif)
 
 ## Что реализовано
 
