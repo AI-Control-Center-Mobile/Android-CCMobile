@@ -1,72 +1,172 @@
 # Android-CCMobile
 
-Android client for a local-first AI control workspace built around OpenRouter. The app lets you save an API key on device, organize work into projects and threads, chat with selected models, compare two model responses side by side, and inspect OpenRouter key diagnostics without relying on an app backend.
+`Android-CCMobile` — локальный Android-клиент для работы с LLM-провайдерами без собственного backend-сервера приложения. Ключи провайдеров, проекты, треды, сообщения и кэш каталога моделей хранятся на устройстве, а сетевые запросы идут напрямую в API провайдеров.
 
-## Demo
+Текущая кодовая база поддерживает `OpenRouter`, `Groq` и `SiliconFlow`, потоковый чат, выбор модели, compare двух моделей в рамках одного треда и просмотр квот/диагностики по настроенным провайдерам.
+
+## Демо
 
 - [Screen recording demo](docs/Screen_recording_20260430_135651.mp4)
 
-## What the app does
+## Что реализовано
 
-- Stores OpenRouter API keys locally in encrypted Android storage
-- Organizes conversations into projects and threads
-- Sends chat prompts to OpenRouter models and streams assistant responses
-- Compares two models side by side for the same prompt
-- Shows key diagnostics and free-tier quota status in Settings
-- Keeps app state on device using Room and DataStore
+- Локальное хранение API-ключей провайдеров в зашифрованном виде.
+- Организация работы по `projects` и `threads`.
+- Экран быстрого старта `New Chat` для создания нового треда в самом свежем проекте.
+- Обычный чат внутри треда с потоковым отображением ответа ассистента.
+- Выбор модели через `Model Picker` с использованием сетевого каталога и локального кэша.
+- `Compare`-сценарий для двух моделей с возможностью продолжить тред с выбранным победителем.
+- `Settings` с управлением ключами, квотами/балансами провайдеров и очисткой локальных данных.
+- Автоматическое создание demo-workspace, если база пуста и пользователь впервые сохраняет ключ.
 
-## Main user flow
+## Основной пользовательский поток
 
-1. On first launch, the app opens the setup screen.
-2. The user saves an OpenRouter API key.
-3. The app routes to `Projects`.
-4. The user can create or open a project.
-5. Inside a project, the user can create a thread and open the chat screen.
-6. From chat, the user can compare two models on the same prompt and continue with the preferred result.
+1. При отсутствии сохранённых ключей приложение стартует с `Setup / Initialize`.
+2. Пользователь добавляет ключ одного из провайдеров.
+3. После этого открывается `Projects`.
+4. Пользователь может создать проект, открыть его, создать тред и перейти в `Thread`.
+5. Внутри треда можно выбрать модель, отправить prompt, получить потоковый ответ и запустить `Compare`.
+6. В `Settings` можно управлять ключами, обновлять информацию по квотам и очищать локальные данные.
 
-## Tech stack
+## Экраны и сценарии
 
-- Kotlin 2.0.21
-- Android Gradle Plugin 9.0.1
-- Jetpack Compose + Material 3
-- Android Navigation Compose
-- Room for local persistence
-- DataStore for app preferences
-- EncryptedSharedPreferences + MasterKey for API key storage
-- Retrofit + OkHttp + kotlinx.serialization for OpenRouter networking
-- JUnit + MockWebServer + coroutine test utilities for tests
+### `Setup / Initialize`
 
-## Module layout
+- Выбор провайдера: `OpenRouter`, `Groq`, `SiliconFlow`.
+- Ввод и локальное сохранение API-ключа.
+- Отображение уже настроенных провайдеров.
+- Пояснение, что ключи хранятся только на устройстве.
+
+### `Projects`
+
+- Создание проекта.
+- Список существующих проектов.
+- Переход в `Project Detail`.
+
+### `Project Detail`
+
+- Список тредов проекта.
+- Создание нового треда.
+- Просмотр сводки по активности проекта.
+
+### `New Chat`
+
+- Быстрое создание нового треда в самом свежем проекте.
+- Пустое состояние, если проектов ещё нет.
+
+### `Thread`
+
+- История сообщений внутри треда.
+- Выбор chat-модели.
+- Потоковая генерация ответа.
+- Отображение метаданных ответа: провайдер, модель, latency, стоимость.
+- Переход в `Compare`.
+
+### `Model Picker`
+
+- Поиск по списку доступных моделей.
+- Отдельные режимы для `CHAT`, `COMPARE A`, `COMPARE B`.
+- Использование кэша моделей при сетевых сбоях, если кэш уже есть.
+
+### `Compare`
+
+- Запуск двух независимых ответов на один prompt.
+- Выбор `Model A` и `Model B`.
+- Повтор неудавшейся стороны сравнения.
+- Сохранение победившего ответа обратно в тред.
+
+### `Settings`
+
+- Добавление, замена и удаление ключей провайдеров.
+- Отображение квот, балансов и диагностических снапшотов по настроенным провайдерам.
+- Очистка всех ключей.
+- Полное удаление локальных данных приложения.
+
+## Архитектура
+
+Проект разбит на feature-модули и два инфраструктурных слоя: локальное хранение и сеть.
 
 - `:app`
-  - Android application entry point
-  - DI container wiring
-  - top-level navigation
+  - точка входа приложения;
+  - верхнеуровневая навигация;
+  - DI через `AppContainer`;
+  - экраны `New Chat` и `Model Picker`.
 - `:core-model`
-  - domain contracts and shared models
-  - repository interfaces
-  - route definitions and shared error types
+  - доменные модели;
+  - repository-контракты;
+  - route-константы;
+  - общие типы ошибок и служебные enum.
 - `:core-ui`
-  - app theme, spacing, reusable cards/buttons/layout primitives
-  - markdown rendering helpers used by chat and compare flows
+  - тема приложения;
+  - spacing/typography;
+  - переиспользуемые Compose-компоненты;
+  - markdown-рендеринг ответов ассистента.
 - `:data-storage`
-  - Room database, DAOs, entities, repositories
-  - encrypted API key storage
+  - `Room`-база, `DAO`, entity и mapper-ы;
+  - локальные repository-реализации;
+  - `DataStore`-preferences;
+  - безопасное хранение ключей;
+  - demo-seed локального workspace.
 - `:data-network`
-  - OpenRouter service definitions
-  - DTOs, mappers, repositories for models/chat/compare/diagnostics
+  - Retrofit/OkHttp-сервисы провайдеров;
+  - DTO и mapper-ы;
+  - unified-репозитории для моделей, чата, compare и квот.
 - `:feature-setup`
-  - first-run key setup flow
+  - first-run flow и сохранение ключей.
 - `:feature-projects`
-  - project list and project detail/thread list
+  - список проектов и экран деталей проекта.
 - `:feature-chat`
-  - thread chat screen and streaming response flow
+  - тред, отправка prompt и потоковое получение ответа.
 - `:feature-compare`
-  - side-by-side model comparison UI and winner continuation flow
+  - compare-flow для двух моделей и сохранение победителя.
 - `:feature-settings`
-  - saved key management, quota diagnostics, destructive local-data actions
+  - управление ключами, квотами и destructive-операциями.
 
-## Project structure
+## Хранение данных и безопасность
+
+- API-ключи сохраняются через `EncryptedSharedPreferences` и `MasterKey`.
+- Пользовательские данные приложения хранятся локально в `Room`.
+- Настройки и снапшоты квот сохраняются через `DataStore`.
+- Приложение не использует собственный backend: ключи применяются непосредственно для вызовов API провайдеров.
+
+Основные локальные сущности:
+
+- `ProjectEntity`
+- `ThreadEntity`
+- `MessageEntity`
+- `CachedModelEntity`
+
+## Сетевой слой и провайдеры
+
+Сетевой слой реализован поверх `Retrofit`, `OkHttp` и `kotlinx.serialization`. Текущая кодовая база поддерживает:
+
+- загрузку каталога моделей;
+- потоковый и непотоковый chat-flow;
+- compare двух моделей;
+- диагностику и квоты по настроенным провайдерам.
+
+Особенности текущей реализации:
+
+- список моделей агрегируется по всем сохранённым провайдерам;
+- при частичных сетевых сбоях используются локально закэшированные модели;
+- квоты в `Settings` строятся по каждому провайдеру отдельно;
+- `OpenRouter`, `Groq` и `SiliconFlow` обрабатываются через unified repository-слой с провайдер-специфичными gateway/service-адаптерами.
+
+## Технический стек
+
+- `Kotlin 2.0.21`
+- `Android Gradle Plugin 9.0.1`
+- `Jetpack Compose` + `Material 3`
+- `Navigation Compose`
+- `Room`
+- `DataStore`
+- `Android Security Crypto`
+- `Retrofit`
+- `OkHttp`
+- `kotlinx.serialization`
+- `JUnit`, coroutine test utilities, `MockWebServer`
+
+## Структура проекта
 
 ```text
 Android-CCMobile/
@@ -85,200 +185,25 @@ Android-CCMobile/
 └── settings.gradle.kts
 ```
 
-## Prerequisites
-
-- Android Studio with a recent AGP 9.x compatible toolchain
-- JDK 17
-- Android SDK 36
-- An emulator or Android device with API 29+
-- Internet access for OpenRouter requests
-
-## Getting started
-
-### 1. Clone the repository
-
-```bash
-git clone https://github.com/AI-Control-Center-Mobile/Android-CCMobile.git
-cd Android-CCMobile
-```
-
-### 2. Open in Android Studio
-
-Open the repository root as a Gradle project. The project uses the version catalog in `gradle/libs.versions.toml` and the modules declared in `settings.gradle.kts`.
-
-### 3. Sync dependencies
-
-Android Studio Gradle sync should resolve:
-
-- AndroidX Compose libraries
-- Room
-- Retrofit / OkHttp
-- DataStore
-- Android Security Crypto
-
-### 4. Build from terminal
-
-```bash
-./gradlew app:assembleDebug
-```
-
-### 5. Install on a connected device or emulator
-
-```bash
-./gradlew app:installDebug
-```
-
-## First-run setup
-
-The app launches into the setup flow if no OpenRouter key is available.
-
-- Enter an OpenRouter API key
-- Save it locally on device
-- Continue to Projects
-
-The key is stored in encrypted shared preferences via `EncryptedSharedPreferences` and `MasterKey`.
-
-## Local data model
-
-The app persists data with Room using these entities:
-
-- `ProjectEntity`
-- `ThreadEntity`
-- `MessageEntity`
-- `CachedModelEntity`
-
-This supports:
-
-- local project and thread browsing
-- persisted conversation history
-- cached model catalog data for picker/compare flows
-
-## OpenRouter integration
-
-The app talks directly to OpenRouter from the device.
-
-### Supported network flows
-
-- model catalog fetch
-- chat completion / streaming chat
-- compare flow using two independent model requests
-- current key diagnostics lookup
-
-### Important behavior
-
-- Chat uses streamed assistant responses.
-- Compare runs model A and model B independently, then lets the user continue with the preferred winner.
-- Settings can query current key diagnostics, including free-tier related metadata.
-- Rate limits for `:free` models are still relevant even if the account has credits.
-
-## UI architecture
-
-The app is feature-modular but intentionally simple:
-
-- `app` owns navigation and dependency wiring
-- each feature module owns its screen state and ViewModel
-- `core-ui` centralizes shared visual language
-- `core-model` owns contracts between features and data layers
-- repositories abstract storage/network details from features
-
-This keeps the app easy to iterate on while still separating:
-
-- UI composition
-- domain contracts
-- persistence
-- network transport
-
-## Key screens
-
-### Setup
-
-- saves the OpenRouter key
-- explains local-only credential handling
-
-### Projects
-
-- create workspace
-- browse existing workspaces
-- open project detail
-
-### Project detail
-
-- see thread summary for a project
-- create a new thread
-- browse recent thread previews
-
-### Chat
-
-- select a model
-- send prompts
-- stream assistant output
-- open compare flow
-
-### Compare
-
-- choose model A and model B
-- run side-by-side compare
-- retry failed candidates
-- continue with the winning answer
-
-### Settings
-
-- add/remove/clear saved OpenRouter keys
-- inspect quota diagnostics
-- wipe local app data
-
-## Build commands
-
-### Build debug APK
-
-```bash
-./gradlew app:assembleDebug
-```
-
-### Install debug APK
-
-```bash
-./gradlew app:installDebug
-```
-
-### Run unit tests
-
-```bash
-./gradlew test
-```
-
-### Run a targeted module test task
-
-```bash
-./gradlew feature-compare:testDebugUnitTest
-```
-
-## Notes for development
-
-- `MainActivity` enables edge-to-edge and hosts `AiControlCentreRoot`.
-- Navigation is driven from `app/navigation/AppNavigation.kt`.
-- The initial destination is decided by whether an API key exists.
-- The app can seed demo workspace data when local storage is empty and a key becomes available.
-- Markdown helpers in `core-ui` are used both for full assistant output and compact previews.
-
-## Security notes
-
-- API keys are stored locally, not on an app-owned backend.
-- `allowBackup` is disabled in the Android manifest.
-- Local data wipe in Settings clears credentials and local workspace state.
-
-## Current limitations
-
-- Compare reliability on `:free` models is constrained by OpenRouter/provider-side rate limits.
-- The app is Android-only.
-- There is no cloud sync layer; this is intentionally local-first.
-
-## Repository sanity checks
-
-Useful smoke check:
-
-```bash
-./gradlew app:assembleDebug
-```
-
-If you are actively changing model/network behavior, also run the relevant module tests before pushing.
+## Минимальные требования
+
+- JDK `17`
+- Android SDK `36`
+- `minSdk 29`
+- среда, совместимая с AGP `9.0.1`
+- доступ в интернет для сетевых запросов к провайдерам
+
+## Навигация и важные точки входа
+
+- `MainActivity` включает edge-to-edge и хостит корневой UI.
+- Верхнеуровневая навигация описана в `app/navigation/AppNavigation.kt`.
+- Стартовый экран определяется по наличию хотя бы одного сохранённого provider key.
+- При пустом локальном хранилище приложение может автоматически создать demo-workspace после появления ключа.
+- Markdown-хелперы из `core-ui` используются и для полного рендеринга ответов ассистента, и для компактных превью.
+
+## Ограничения
+
+- Надёжность `Compare` на `:free`-моделях ограничена rate limit-ами провайдера.
+- Приложение ориентировано только на Android.
+- Облачной синхронизации нет: текущая архитектура намеренно остаётся local-first.
+- Экспорт/импорт данных будет реализован позднее.
