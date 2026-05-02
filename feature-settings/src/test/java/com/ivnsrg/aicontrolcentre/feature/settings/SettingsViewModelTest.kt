@@ -48,6 +48,27 @@ class SettingsViewModelTest {
             Dispatchers.resetMain()
         }
     }
+
+    @Test
+    fun `clear all data resets state and invokes callback`() = runTest {
+        Dispatchers.setMain(coroutineContext[ContinuationInterceptor] as CoroutineDispatcher)
+        try {
+            val repository = FakeSettingsRepository().apply {
+                saveApiKey(ModelProvider.OPEN_ROUTER, "sk-or-v1-test")
+            }
+            val viewModel = SettingsViewModel(repository, FakeProviderQuotaRepository())
+            var callbackInvoked = false
+
+            advanceUntilIdle()
+            viewModel.clearAllData { callbackInvoked = true }
+            advanceUntilIdle()
+
+            assertEquals(SettingsUiState(), viewModel.uiState.value)
+            assertTrue(callbackInvoked)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
 }
 
 private class FakeProviderQuotaRepository : ProviderQuotaRepository {

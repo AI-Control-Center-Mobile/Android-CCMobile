@@ -18,8 +18,10 @@ import com.ivnsrg.aicontrolcentre.data.storage.entity.ThreadEntity
 import com.ivnsrg.aicontrolcentre.data.storage.mapper.toDomain
 import com.ivnsrg.aicontrolcentre.data.storage.preferences.AppPreferencesStore
 import com.ivnsrg.aicontrolcentre.data.storage.security.SecureApiKeyStorage
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withContext
 
 class DefaultProjectsRepository(
     private val projectsDao: ProjectsDao,
@@ -154,8 +156,10 @@ class DefaultSettingsRepository(
     }
 
     override suspend fun clearAllLocalData() {
-        secureApiKeyStorage.clearAllApiKeys()
-        database.clearAllTables()
-        appPreferencesStore.clear()
+        withContext(Dispatchers.IO) {
+            secureApiKeyStorage.clearAllApiKeys()
+            database.clearAllTables()
+            appPreferencesStore.clear()
+        }
     }
 }
