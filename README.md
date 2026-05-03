@@ -1,3 +1,4 @@
+<img src="https://github.com/AI-Control-Center-Mobile/Android-CCMobile/blob/main/docs/screenshots/logo_app.png" alt="Лого" style="width: 50px; height: 50px;"/> 
 # Android-CCMobile
 
 `Android-CCMobile` — локальный Android-клиент для работы с LLM-провайдерами без собственного backend-сервера приложения. Ключи провайдеров, проекты, треды, сообщения и кэш каталога моделей хранятся на устройстве, а сетевые запросы идут напрямую в API провайдеров.
@@ -5,7 +6,7 @@
 Текущая кодовая база поддерживает `OpenRouter`, `Groq` и `SiliconFlow`, потоковый чат, выбор модели, compare двух моделей в рамках одного треда и просмотр квот/диагностики по настроенным провайдерам.
 
 ## Демо
-[Screen recording demo](docs/screenshots/Screen_recording_20260502_200433.gif)
+<img src="https://github.com/AI-Control-Center-Mobile/Android-CCMobile/blob/main/docs/screenshots/Screen_recording_20260502_200433.gif"/>
 
 ## Что реализовано
 
